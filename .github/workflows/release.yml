@@ -66,7 +66,10 @@ jobs:
   # 构建 Android APK
   flutter-build-android:
     name: "Release for Android"
-    needs: [flutter-test, flutter-analyze]
+    # 不再等待 test/analyze：Android 构建与 test/analyze 三个 job 并行执行，
+    # 显著缩短每次发布的总耗时。质量门槛下移到 release（release 强制等三者全部通过）。
+    # 若必须让测试先于构建通过，把下面三行 needs 恢复成 [flutter-test, flutter-analyze]。
+    needs: []
     runs-on: "ubuntu-latest"
     permissions:
       contents: read
@@ -141,9 +144,11 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
 
   # 构建 iOS IPA（无签名）
+  # ⛔ 已屏蔽：not now。需要时把 if 改为可触发的条件（如 github.ref_name 包含 ios /
+  # 手动 workflow_dispatch 时放开），并把下方 release 的 needs 与下载/改名步骤恢复。
   flutter-build-ios:
     name: "Release for iOS"
-    needs: [flutter-test, flutter-analyze]
+    if: ${{ false }}
     runs-on: "macos-latest"
     permissions:
       contents: read
@@ -302,7 +307,8 @@ jobs:
   release:
     name: "Release"
     runs-on: "ubuntu-latest"
-    needs: [flutter-build-android, flutter-build-ios]
+    # iOS 已屏蔽：发布只需 Android 构建；同时要求 test/analyze 通过（它们与构建并行执行）。
+    needs: [flutter-test, flutter-analyze, flutter-build-android]
     permissions:
       contents: write
     steps:
@@ -317,16 +323,10 @@ jobs:
           name: android_apk
           path: android_apk
 
-      - name: Download iOS IPA
-        uses: actions/download-artifact@v4
-        with:
-          name: ios_ipa
-          path: ios_ipa
-
+      # iOS 已屏蔽，不再下载 ios_ipa。
       - name: Rename artifacts with tag
         run: |
           cp android_apk/app-release.apk Bilexora_android_${{ github.ref_name }}.apk
-          cp ios_ipa/*.ipa Bilexora_ios_${{ github.ref_name }}.ipa
 
       - name: Prepare release notes
         id: release_notes
@@ -371,4 +371,3 @@ jobs:
           body: ${{ steps.release_notes.outputs.release_body }}
           files: |
             Bilexora_android_*.apk
-            Bilexora_ios_*.ipa

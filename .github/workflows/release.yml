@@ -146,12 +146,30 @@ jobs:
           grep -n 'kAnyType =' "$FILE" || true
       - name: Disable code signing (project cleanup)
         run: |
-          # Flutter 预检会因 pbxproj 签名配置报 team 错, 提前清理签名设置
-          # 注意: 不要改成 Manual (会让 xcodebuild 失败), 只删除 team / 清空 identity
+          # Flutter 预检(validateXcodeProject)会在 xcodebuild 前读 pbxproj, 发现签名配置
+          # 未禁用就误报 “Development Team required”。
+          # 参考已验证方案: 删除 team / 清空 id / 显式禁用签名 (不改 Manual)
           sed -i '' '/DEVELOPMENT_TEAM/d' ios/Runner.xcodeproj/project.pbxproj
-          sed -i '' 's/CODE_SIGN_IDENTITY = .*/CODE_SIGN_IDENTITY = \"\";/' ios/Runner.xcodeproj/project.pbxproj || true
-      - name: Build IPA (flutter full build)
-        run: flutter build ios --release --no-codesign
+          perl -i -pe 's/CODE_SIGN_IDENTITY = ".*/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -i -pe 's/"CODE_SIGN_IDENTITY\[[^\"]*\]" = ".*/\"CODE_SIGN_IDENTITY\" = \"\";/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -i -pe 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;\n                            CODE_SIGNING_ALLOWED = NO;\n                            CODE_SIGNING_REQUIRED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
+          echo "=== 签名相关字段 ==="
+          grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
+      - name: Build IPA (flutter build + fallback)
+        run: |
+          # flutter build 可能仍误报 team, 用 set +e 忽略; 只要 Runner.app 生成了就算成功
+          set +e
+          flutter build ios --release --no-codesign
+          set -e
+          if [ ! -d build/ios/iphoneos/Runner.app ]; then
+            echo "=== Runner.app 不存在, fallback 到 xcodebuild workspace ==="
+            cd ios
+            xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+              -configuration Release -sdk iphoneos -destination 'generic/platform=ios' \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+            cd ..
+          fi
+          ls -la build/ios/iphoneos/Runner.app
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"

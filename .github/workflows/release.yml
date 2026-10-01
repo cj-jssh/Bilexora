@@ -86,6 +86,14 @@ jobs:
       - name: Get Flutter dependencies
         run: flutter pub get
         shell: bash
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
       - name: Build Flutter for Android
         run: flutter build apk --release
         shell: bash
@@ -123,18 +131,14 @@ jobs:
           sed -i.bak 's/constexpr unicode_script::ScriptType kAnyType =/const unicode_script::ScriptType kAnyType =/' "$FILE"
           grep -n 'kAnyType =' "$FILE" || true
       - name: Build IPA
-        run: flutter build ios --release --no-codesign
+        run: flutter build ipa --release --no-codesign
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"
-          CODE_SIGN_IDENTITY: ""
-          DEVELOPMENT_TEAM: ""
-      - name: Create IPA
+      - name: Rename & upload IPA
         run: |
-          mkdir Payload
-          cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
-          find Payload/Runner.app/Frameworks -type d -name "*.framework" -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \;
-          zip -q -r Bilexora_ios_${{ github.ref_name }}.ipa Payload
+          ls -la build/ios/ipa/ || true
+          cp build/ios/ipa/*.ipa Bilexora_ios_${{ github.ref_name }}.ipa
       - name: Upload iOS build
         uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,3 @@
+[submodule "plugins/bergamot_translator"]
+	path = plugins/bergamot_translator
+	url = https://github.com/jesses2025smith/bergamot_translator.git

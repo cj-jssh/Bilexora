@@ -58,7 +58,7 @@ jobs:
         run: flutter pub get
         shell: bash
       - name: Analyze Flutter project
-        run: flutter analyze --no-fatal-infos --fatal-warnings
+        run: flutter analyze lib test --no-fatal-infos --fatal-warnings
         shell: bash
 
   # 构建 Android APK

@@ -116,6 +116,12 @@ jobs:
         run: flutter pub get
       - name: Install native build tools
         run: brew install cmake ninja
+      - name: Patch sentencepiece constexpr for newer Clang
+        run: |
+          FILE="plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/marian-dev/src/3rd_party/sentencepiece/src/trainer_interface.cc"
+          # 新 Clang 对 enum constexpr 初始化报错, 改为 const (不改逻辑)
+          sed -i.bak 's/constexpr unicode_script::ScriptType kAnyType =/const unicode_script::ScriptType kAnyType =/' "$FILE"
+          grep -n 'kAnyType =' "$FILE" || true
       - name: Build IPA
         run: flutter build ios --release --no-codesign
       - name: Create IPA

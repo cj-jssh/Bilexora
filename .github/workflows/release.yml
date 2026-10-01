@@ -156,36 +156,43 @@ jobs:
           perl -i -pe 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;\n                            CODE_SIGNING_ALLOWED = NO;\n                            CODE_SIGNING_REQUIRED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
           echo "=== 签名相关字段 ==="
           grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
-      - name: Build IPA (flutter build)
+      - name: Build IPA (flutter build strict)
         run: |
           rm -rf build/ios
-          set +e
+          # 严格模式: 构建必须成功, 否则 var 报错后退出
           flutter build ios --release --no-codesign 2>&1 | tee /tmp/ios_build.log
-          FLUTTER_EXIT=$?
-          set -e
-          echo "=== flutter build 退出码: $FLUTTER_EXIT ==="
-          echo "=== 构建日志中的 error/failed 行 ==="
-          grep -iE "error:|\berror\b|failed|[^a-z]fail[^a-z]" /tmp/ios_build.log | tail -40 || true
-          echo "=== Runner.app 是否生成 ==="
-          find build/ios -name 'Runner.app' -type d 2>/dev/null || echo "未找到 Runner.app"
+          # 检查产物必须完整
+          APP="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP" ]; then
+            echo "❌ Runner.app 未生成, 构建失败"
+            grep -iE "error:|failed" /tmp/ios_build.log | tail -30 || true
+            exit 1
+          fi
+          echo "=== Runner.app 内容 ==="
+          ls -la "$APP"
+          du -sh "$APP"
+          # 必须包含 Flutter 引擎与 assets
+          if [ ! -f "$APP/Frameworks/Flutter.framework/Flutter" ] && [ ! -d "$APP/Frameworks" ]; then
+            echo "❌ Runner.app 缺少 Flutter.framework, 产物不完整"
+            find "$APP" -maxdepth 2 -type d | head
+            exit 1
+          fi
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"
           EXPANDED_CODE_SIGN_IDENTITY: ""
       - name: Create unsigned IPA
         run: |
-          APP="$(find build/ios -name 'Runner.app' -type d 2>/dev/null | head -1)"
-          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
-            echo "❌ Runner.app 不存在, 构建失败"
-            exit 1
-          fi
-          echo "app: $APP"
+          APP="build/ios/iphoneos/Runner.app"
+          echo "app: $APP (大小: $(du -sh "$APP" | cut -f1))"
           rm -rf Payload
           mkdir -p Payload
           cp -R "$APP" Payload/Runner.app
           find Payload/Runner.app/Frameworks -type d -name '*.framework' -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \; || true
           zip -q -r Bilexora_ios_${{ github.ref_name }}.ipa Payload
+          echo "=== 生成的 IPA ==="
           ls -la Bilexora_ios_*.ipa
+          du -sh Bilexora_ios_*.ipa
       - name: Upload iOS build
         uses: actions/upload-artifact@v4
         with:

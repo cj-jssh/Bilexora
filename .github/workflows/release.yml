@@ -1,294 +1,457 @@
----
-name: "release"
+```yaml
+name: Flutter CI/CD
 
-# 打 tag（推送到远程触发）。tag 名 = commit MD5 前 8 位
-# 可用 git release 一条命令发版（git 全局别名, 只打标+推送, 不 add/commit）
 on:
   push:
     tags:
-      - "*"
-  # 支持在 GitHub Actions 界面手动触发构建(排查/复跑更方便)
-  workflow_dispatch:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  # 测试 + 静态检查（作为构建的前置门槛）
   flutter-test:
-    runs-on: "ubuntu-latest"
-    permissions:
-      contents: read
+    name: Flutter Test
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Clone repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Set up Flutter
+
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2.16.0
         with:
-          channel: stable
           flutter-version: '3.47.4'
-      - name: Install native build tools
+          channel: stable
+          cache: true
+
+      - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ libsqlite3-dev
-        shell: bash
-      - name: Get Flutter dependencies
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            g++ \
+            libsqlite3-dev
+
+      - name: Flutter pub get
         run: flutter pub get
-        shell: bash
-      - name: Run Flutter tests
+
+      - name: Flutter test
         run: flutter test
-        shell: bash
+
 
   flutter-analyze:
-    runs-on: "ubuntu-latest"
-    permissions:
-      contents: read
+    name: Flutter Analyze
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Clone repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Set up Flutter
+
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2.16.0
         with:
-          channel: stable
           flutter-version: '3.47.4'
-      - name: Install native build tools
+          channel: stable
+          cache: true
+
+      - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ libsqlite3-dev
-        shell: bash
-      - name: Get Flutter dependencies
-        run: flutter pub get
-        shell: bash
-      - name: Analyze Flutter project
-        run: flutter analyze lib test --no-fatal-infos --fatal-warnings
-        shell: bash
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            g++ \
+            libsqlite3-dev
 
-  # 构建 Android APK
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Flutter analyze
+        run: flutter analyze
+
+
   flutter-build-android:
-    name: "Release for Android"
-    # 不再等待 test/analyze：Android 构建与 test/analyze 三个 job 并行执行，
-    # 显著缩短每次发布的总耗时。质量门槛下移到 release（release 强制等三者全部通过）。
-    # 若必须让测试先于构建通过，把下面三行 needs 恢复成 [flutter-test, flutter-analyze]。
-    needs: []
-    runs-on: "ubuntu-latest"
-    permissions:
-      contents: read
+    name: Build Android
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Clone repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Set up JDK 17
+
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '17'
-          distribution: 'temurin'
-      - name: Set up Flutter
+
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2.16.0
         with:
-          channel: stable
           flutter-version: '3.47.4'
+          channel: stable
           cache: true
-      - name: Get Flutter dependencies
-        run: flutter pub get
-        shell: bash
-      - name: Optimize Gradle memory for CI
+
+      - name: Install native dependencies
         run: |
-          # GitHub Actions ubuntu 仅 ~7G 内存, 项目 -Xmx8G 超配会导致 OOM/极慢
-          # CI 上临时改用适配值, 不修改源文件(本地开发不变)
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            g++ \
+            libsqlite3-dev
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # ------------------------------------------------------------
+      # Gradle configuration
+      # ------------------------------------------------------------
+
+      - name: Configure Gradle
+        shell: bash
+        run: |
           cat > android/gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m -XX:+HeapDumpOnOutOfMemoryError
+          org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m -Dfile.encoding=UTF-8
+          org.gradle.daemon=true
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.configuration-cache=true
           android.useAndroidX=true
           android.newDsl=false
           android.builtInKotlin=false
-          kotlin.incremental=false
-          org.gradle.caching=true
-          org.gradle.parallel=true
-          org.gradle.daemon=true
+          kotlin.incremental=true
           EOF
-      # gradle/pub 依赖缓存(与原生 .so 缓存分离, 各自独立命中)
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-      - name: Cache Flutter & pub dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.pub-cache
-          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pub-
-      # ---- bergamot 原生预编译缓存 (关键提速) ----
-      # 思路: bergamot 原生依赖 commit 固定(96c0fcca / cld2 b56fa78a), 产物理论上不变。
-      # 与其依赖脆弱的 .cxx(跨 runner 换机器后 Gradle 仍全量重编), 不如把最终
-      # libbergamot_translator.so 直接作产物缓存: 命中则放进 jniLibs 并关闭插件 native_build,
-      # 让 flutter build 完全跳过原生 C++ 编译。未命中则本次正常编译, 事后把 .so 提取入库。
-      # 指纹 = 固定原生版本, 不随 git tag/commit 变化, 同版本 release 稳定命中。
-      - name: Compute bergamot native fingerprint
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # ------------------------------------------------------------
+      # Bergamot native binary
+      #
+      # IMPORTANT:
+      # Do NOT use actions/cache here.
+      #
+      # GitHub Actions cache is scoped by ref, so different tags
+      # cannot reliably reuse the .so.
+      #
+      # Instead, the binary is stored as a GitHub Release asset.
+      # ------------------------------------------------------------
+
+      - name: Calculate Bergamot fingerprint
         id: bm
         shell: bash
         run: |
-          # 原生依赖 commit(见 plugins/bergamot_translator 内 submodule gitlink)
+          set -e
+
           PAYLOAD="96c0fcca c4c87de6 b56fa78a"
+
           MD5=$(printf '%s' "$PAYLOAD" | md5sum | cut -d' ' -f1)
-          echo "md5=${MD5:0:12}"
-          echo "md5=${MD5:0:12}" >> "$GITHUB_OUTPUT"
-      - name: Restore prebuilt bergamot .so
-        id: restore-so
-        uses: actions/cache@v4
-        with:
-          path: android/app/src/main/jniLibs
-          key: bergamot-so-${{ steps.bm.outputs.md5 }}
-          restore-keys: |
-            bergamot-so-
-      - name: Skip bergamot native build if .so cached
+
+          echo "md5=$MD5" >> "$GITHUB_OUTPUT"
+
+          echo "Bergamot fingerprint: $MD5"
+
+      - name: Prepare Bergamot directories
         shell: bash
         run: |
-          SO_DIR="android/app/src/main/jniLibs/arm64-v8a"
-          if [ -n "$(ls "$SO_DIR"/libbergamot_translator.so 2>/dev/null)" ]; then
-            echo "命中预编译 .so, 禁用 bergamot 插件的 native_build 以跳过 C++ 编译"
-            # Flutter 读取 .flutter-plugins-dependencies 决定 include 插件;
-            # 把 bergamot 的 native_build 置 false -> Flutter/AGP 不触发 externalNativeBuild。
-            python3 -c "import json;f='.flutter-plugins-dependencies';d=json.load(open(f));[p.update(native_build=False) for p in d['plugins']['android'] if p['name']=='bergamot_translator'];json.dump(d,open(f,'w'));print('bergamot native_build set False')"
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p /tmp/bergamot
+
+      - name: Download reusable Bergamot binary
+        id: bergamot-download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BERGAMOT_MD5: ${{ steps.bm.outputs.md5 }}
+        run: |
+          set -e
+
+          ASSET="bergamot-${BERGAMOT_MD5}-arm64.tar.gz"
+
+          echo "Looking for release asset: $ASSET"
+
+          if gh release list --limit 100 --json tagName,isDraft,isPrerelease \
+              | jq -e '.[] | select(.tagName == "bergamot-binaries")' >/dev/null 2>&1; then
+            echo "Found dedicated Bergamot release."
+          fi
+
+          if gh release view bergamot-binaries >/dev/null 2>&1; then
+            echo "Checking asset..."
+
+            if gh release download bergamot-binaries \
+                --pattern "$ASSET" \
+                --dir /tmp/bergamot \
+                --clobber; then
+
+              echo "Bergamot binary downloaded."
+
+              tar -xzf "/tmp/bergamot/$ASSET" \
+                -C android/app/src/main/jniLibs/arm64-v8a
+
+              if [ -f "android/app/src/main/jniLibs/arm64-v8a/libbergamot_translator.so" ]; then
+                echo "hit=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+          fi
+
+          echo "Bergamot binary not found."
+          echo "hit=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check Bergamot binary
+        shell: bash
+        run: |
+          if [ -f android/app/src/main/jniLibs/arm64-v8a/libbergamot_translator.so ]; then
+            echo "=============================================="
+            echo "Bergamot .so: HIT"
+            echo "No native compilation required."
+            echo "=============================================="
           else
-            echo "无预编译 .so, 本次将执行完整原生编译"
+            echo "=============================================="
+            echo "Bergamot .so: MISS"
+            echo "Native compilation will be required."
+            echo "=============================================="
           fi
-      - name: Build Flutter for Android (arm64 release)
-        run: flutter build apk --release --target-platform android-arm64
-        shell: bash
-      # 本次若为首次/原生变化编译, 把产出的 .so 存进预编译缓存, 供后续 release 复用。
-      # 只有当 restore 未命中时才会执行完整编译并走到导出; 命中时 jniLibs 已存在无需处理。
-      - name: Export prebuilt bergamot .so
+
+      # ------------------------------------------------------------
+      # If reusable binary exists:
+      # prevent bergamot plugin from rebuilding native library.
+      # ------------------------------------------------------------
+
+      - name: Disable Bergamot native build
+        if: steps.bergamot-download.outputs.hit == 'true'
         shell: bash
         run: |
-          DEST="android/app/src/main/jniLibs/arm64-v8a"
-          mkdir -p "$DEST"
-          SO=$(find plugins build -path '*arm64*' -name 'libbergamot_translator.so' 2>/dev/null | head -n1)
-          if [ -z "$SO" ]; then
-            echo "❌ 未找到 libbergamot_translator.so"
-            exit 0
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(".flutter-plugins-dependencies")
+
+          if not path.exists():
+              print(".flutter-plugins-dependencies not found")
+              raise SystemExit(0)
+
+          data = json.loads(path.read_text())
+
+          changed = False
+
+          plugins = data.get("plugins", {})
+
+          for platform in ("android",):
+              for plugin in plugins.get(platform, []):
+                  if plugin.get("name") == "bergamot_translator":
+                      plugin["native_build"] = False
+                      changed = True
+
+          if changed:
+              path.write_text(
+                  json.dumps(data, ensure_ascii=False, indent=2)
+              )
+              print("Bergamot native_build=false")
+          else:
+              print("Bergamot plugin entry not found")
+          PY
+
+      # ------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+
+          time flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --verbose
+
+      # ------------------------------------------------------------
+      # If the .so did not exist before build, extract it and
+      # upload it later as a reusable Release asset.
+      # ------------------------------------------------------------
+
+      - name: Locate Bergamot native library
+        if: steps.bergamot-download.outputs.hit != 'true'
+        id: locate-bergamot
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for libbergamot_translator.so..."
+
+          FOUND=$(find . \
+            -type f \
+            -name "libbergamot_translator.so" \
+            -not -path "./android/app/src/main/jniLibs/*" \
+            | head -n 1 || true)
+
+          if [ -z "$FOUND" ]; then
+            echo "ERROR: libbergamot_translator.so was not found."
+            exit 1
           fi
-          cp "$SO" "$DEST/libbergamot_translator.so"
-          echo "已导出 $SO -> $DEST/libbergamot_translator.so"
-          ls -la "$DEST"
-      - name: Upload android APK
+
+          echo "Found:"
+          echo "$FOUND"
+
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+
+          cp "$FOUND" \
+            android/app/src/main/jniLibs/arm64-v8a/libbergamot_translator.so
+
+          echo "path=$FOUND" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Bergamot binary
+        shell: bash
+        run: |
+          set -e
+
+          SO="android/app/src/main/jniLibs/arm64-v8a/libbergamot_translator.so"
+
+          if [ ! -f "$SO" ]; then
+            echo "ERROR: $SO does not exist."
+            exit 1
+          fi
+
+          echo "Bergamot binary:"
+          ls -lh "$SO"
+
+          file "$SO"
+
+      # ------------------------------------------------------------
+      # Package reusable native binary
+      # ------------------------------------------------------------
+
+      - name: Package Bergamot binary
+        if: steps.bergamot-download.outputs.hit != 'true'
+        shell: bash
+        env:
+          BERGAMOT_MD5: ${{ steps.bm.outputs.md5 }}
+        run: |
+          set -e
+
+          cd android/app/src/main/jniLibs/arm64-v8a
+
+          tar -czf \
+            "/tmp/bergamot-${BERGAMOT_MD5}-arm64.tar.gz" \
+            libbergamot_translator.so
+
+          echo "Created:"
+          ls -lh "/tmp/bergamot-${BERGAMOT_MD5}-arm64.tar.gz"
+
+      # ------------------------------------------------------------
+      # Save APK for release job
+      # ------------------------------------------------------------
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK not found."
+            exit 1
+          fi
+
+          ls -lh "$APK"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android_apk
+          name: android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
 
-  # 构建 iOS IPA（无签名）
-  # ⛔ 已屏蔽：not now。需要时把 if 改为可触发的条件（如 github.ref_name 包含 ios /
-  # 手动 workflow_dispatch 时放开），并把下方 release 的 needs 与下载/改名步骤恢复。
+      # ------------------------------------------------------------
+      # Upload new Bergamot binary as normal CI artifact.
+      #
+      # The release job will publish it to the dedicated
+      # "bergamot-binaries" release.
+      # ------------------------------------------------------------
+
+      - name: Upload Bergamot artifact
+        if: steps.bergamot-download.outputs.hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bergamot-binary
+          path: /tmp/bergamot-${{ steps.bm.outputs.md5 }}-arm64.tar.gz
+          if-no-files-found: error
+
+
+  # ==============================================================
+  # iOS
+  # ==============================================================
+
   flutter-build-ios:
-    name: "Release for iOS"
+    name: Build iOS
     if: ${{ false }}
-    runs-on: "macos-latest"
-    permissions:
-      contents: read
-    # CMake 4.x 移除了对 cmake_minimum_required < 3.5 的兼容(vendored marian-dev /
-    # ssplit-cpp 仍写 3.5)。设为 job 级 env, 使 xcodebuild 及 pcre2 等子 configure
-    # 都继承, 不再各自报 CMAKE_MINIMUM_REQUIRED 错。
-    env:
-      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      CODE_SIGNING_ALLOWED: "NO"
-      CODE_SIGNING_REQUIRED: "NO"
+    runs-on: macos-latest
+
     steps:
-      - name: Clone repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Set up Flutter
+
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2.16.0
         with:
-          channel: stable
           flutter-version: '3.47.4'
-      - name: Get Flutter dependencies
+          channel: stable
+          cache: true
+
+      - name: Install native dependencies
+        run: |
+          brew install cmake ninja
+
+      - name: Flutter pub get
         run: flutter pub get
-      - name: Install native build tools
-        run: brew install cmake ninja
-      # 新 Clang 对 enum constexpr 初始化报错, 改为 const (不改逻辑)。
-      # vendored marian-dev 需要该 patch 才可通过新 Clang 编译。
-      - name: Patch sentencepiece constexpr for newer Clang
+
+      # ------------------------------------------------------------
+      # Remove DEVELOPMENT_TEAM from project settings
+      # ------------------------------------------------------------
+
+      - name: Remove DEVELOPMENT_TEAM
+        shell: bash
         run: |
-          FILE="plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/marian-dev/src/3rd_party/sentencepiece/src/trainer_interface.cc"
-          sed -i.bak 's/constexpr unicode_script::ScriptType kAnyType =/const unicode_script::ScriptType kAnyType =/' "$FILE"
-          grep -n 'kAnyType =' "$FILE" || true
-      # CMake 4.x 移除了对 cmake_minimum_required < 3.5 的兼容(vendored
-      # marian-dev/ssplit-cpp 仍写 3.5), 会在 configure 时报
-      # CMAKE_MINIMUM_REQUIRED 错误。patch podspec 里的 cmake 命令传
-      # CMAKE_POLICY_VERSION_MINIMUM=3.5 兼容新 CMake。
-      - name: Patch ssplit pcre2 build flags (disable pcre2grep)
+          find ios -type f \
+            \( -name "*.pbxproj" -o -name "*.xcconfig" \) \
+            -print0 |
+          xargs -0 sed -i '' '/DEVELOPMENT_TEAM/d' || true
+
+      # ------------------------------------------------------------
+      # Flutter iOS configuration
+      # ------------------------------------------------------------
+
+      - name: Flutter iOS config
         run: |
-          # ssplit-cpp 用 ExternalProject 独立构建 pcre2, 顶层 -D 参数不会传入。
-          # 在 FindPCRE2.cmake 的 Internal PROJECT configure 选项里追加禁用
-          # pcre2grep, 避免 iOS 交叉编译下 pcre2grep 链接 JIT(_jit_compile) 失败。
-          F="plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/ssplit-cpp/cmake/FindPCRE2.cmake"
-          awk '{
-            if ($0 ~ /PCRE2_JIT_OPTION/ && !done) {
-              print $0;
-              print "    -DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2GREP_SUPPORT_JIT=OFF";
-              done=1;
-              next
-            } else {
-              print
-            }
-          }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
-          echo "=== FindPCRE2.cmake 修改后 ==="
-          grep -n "PCRE2_BUILD_PCRE2GREP\|PCRE2_JIT_OPTION\|SUPPORT_JIT" "$F" | head      # 修复 vendored marian-dev 的 git_revision.h 生成: 其 CMake 的
-      # add_custom_command DEPENDS <gitdir>/logs/HEAD, 而 GitHub Actions 冷克隆
-      # submodule 不含 logs/HEAD, 导致 make 报 “No rule to make target .../logs/HEAD”。
-      - name: Fix marian-dev git logs/HEAD (CI cold submodule)
+          flutter build ios \
+            --release \
+            --config-only \
+            --no-codesign || true
+
+      # ------------------------------------------------------------
+      # Xcode archive without signing
+      # ------------------------------------------------------------
+
+      - name: Build unsigned iOS archive
+        shell: bash
         run: |
-          cd plugins/bergamot_translator/third_party/bergamot-translator
-          while IFS= read -r gf; do
-            D="$(dirname "$gf")/$(sed 's#^gitdir: ##' "$gf")"
-            D="$(cd "$(dirname "$D")" && pwd)/$(basename "$D")"
-            if [ -d "$D" ] && [ ! -f "$D/logs/HEAD" ]; then
-              mkdir -p "$D/logs"
-              echo > "$D/logs/HEAD"
-              echo "created $D/logs/HEAD"
-            fi
-          done < <(find . -name .git -type f)
-          MARIAN="$(cat 3rd_party/marian-dev/.git 2>/dev/null | sed 's#^gitdir: ##')"
-          echo "marian gitdir: $MARIAN"
-      # 清理签名配置, 供手动 xcodebuild 禁签名使用。
-      - name: Disable code signing (project cleanup)
-        run: |
-          # 移除签名配置, 供手动 xcodebuild 禁用签名使用。
-          sed -i '' '/DEVELOPMENT_TEAM/d' ios/Runner.xcodeproj/project.pbxproj
-          perl -i -pe 's/CODE_SIGN_IDENTITY = ".*/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj
-          perl -i -pe 's/"CODE_SIGN_IDENTITY\[[^\"]*\]" = ".*/\"CODE_SIGN_IDENTITY\" = \"\";/g' ios/Runner.xcodeproj/project.pbxproj
-          echo "=== 签名相关字段 ==="
-          grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
-      # flutter build ios 在无 DEVELOPMENT_TEAM 时会被 validator 硬编码拒绝
-      # (mac.dart _missingDevelopmentTeam), 故用 --config-only 生成工程后
-      # 手动 xcodebuild 绕过 Flutter validator。xcodebuild 会执行 pbxproj 里的
-      # xcode_backend.sh build phase, 嵌入 App.framework / Flutter.framework /
-      # Dart AOT, 配合 CODE_SIGNING_ALLOWED=NO 产出未签名但完整的 Runner.app。
-      - name: Build iOS via xcodebuild (unsigned)
-        run: |
-          flutter build ios --release --config-only --no-codesign 2>&1 | tee /tmp/ios_cfg.log || true
-          # pod install 已由 --config-only 触发, 现在补齐所有 submodule git 的
-          # logs/HEAD(marian-dev CMake 生成 git_revision.h 需要), 否则 make 报
-          # “No rule to make target .../logs/HEAD”。用 git 解析绝对 gitdir 最可靠。
-          while IFS= read -r gf; do
-            G="$(git -C "$(dirname "$gf")" rev-parse --absolute-git-dir 2>/dev/null)" || continue
-            if [ -d "$G" ] && [ ! -f "$G/logs/HEAD" ]; then
-              mkdir -p "$G/logs"
-              echo > "$G/logs/HEAD"
-              echo "created $G/logs/HEAD"
-            fi
-          done < <(find . plugins ios -name .git -type f 2>/dev/null)
-          echo "=== marian gitdir logs check ==="
-          MA="$(git -C plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/marian-dev rev-parse --absolute-git-dir 2>/dev/null)"
-          echo "marian gitdir: $MA"; ls -la "$MA/logs/HEAD" 2>/dev/null || true
+          set -e
+
           cd ios
+
           xcodebuild \
             -workspace Runner.xcworkspace \
             -scheme Runner \
@@ -298,115 +461,151 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            archive 2>&1 | tee /tmp/xcbuild.log
-          cd ..
-          XC_EXIT=${PIPESTATUS[0]}
-          echo "=== xcodebuild 退出码: $XC_EXIT ==="
-          grep -iE "error:|failed" /tmp/xcbuild.log | tail -30 || true
-          APP="ios/build/Runner.xcarchive/Products/Applications/Runner.app"
-          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
-            echo "❌ Runner.app 未生成"
-            exit 1
-          fi
-          echo "=== Runner.app: $APP ==="
-          du -sh "$APP"
-          echo "=== Runner.app 内容(校验非空壳) ==="
-          ls -la "$APP"
-          ls -la "$APP/Frameworks" 2>/dev/null || true
-          du -sh "$APP/Frameworks" 2>/dev/null || true
-          ls -la "$APP/Frameworks/App.framework" 2>/dev/null || echo "no App.framework"
-        env:
-          CODE_SIGNING_ALLOWED: "NO"
-          CODE_SIGNING_REQUIRED: "NO"
-          EXPANDED_CODE_SIGN_IDENTITY: ""
+            archive
 
-      - name: Create unsigned IPA
+      - name: Package unsigned IPA
+        shell: bash
         run: |
-          APP="ios/build/Runner.xcarchive/Products/Applications/Runner.app"
-          if [ ! -d "$APP" ]; then
-            echo "❌ Runner.app 不存在"
-            exit 1
-          fi
-          echo "app: $APP (大小: $(du -sh "$APP" | cut -f1))"
+          set -e
+
+          cd ios
+
           rm -rf Payload
           mkdir -p Payload
-          cp -R "$APP" Payload/Runner.app
-          find Payload/Runner.app/Frameworks -type d -name '*.framework' -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \; || true
-          zip -q -r Bilexora_ios_${{ github.ref_name }}.ipa Payload
-          echo "=== 生成的 IPA ==="
-          ls -la Bilexora_ios_*.ipa
-          du -sh Bilexora_ios_*.ipa
 
-      - name: Upload iOS build
+          cp -R \
+            build/Runner.xcarchive/Products/Applications/Runner.app \
+            Payload/Runner.app
+
+          zip -r unsigned.ipa Payload
+
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ios_ipa
-          path: Bilexora_ios_*.ipa
+          name: ios-unsigned-ipa
+          path: ios/unsigned.ipa
+
+
+  # ==============================================================
+  # Release
+  # ==============================================================
 
   release:
-    name: "Release"
-    runs-on: "ubuntu-latest"
-    # iOS 已屏蔽：发布只需 Android 构建；同时要求 test/analyze 通过（它们与构建并行执行）。
-    needs: [flutter-test, flutter-analyze, flutter-build-android]
+    name: Create Release
+    needs:
+      - flutter-test
+      - flutter-analyze
+      - flutter-build-android
+    runs-on: ubuntu-latest
+
     permissions:
       contents: write
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Download android APK
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Android APK
         uses: actions/download-artifact@v4
         with:
-          name: android_apk
-          path: android_apk
+          name: android-apk
+          path: release
 
-      # iOS 已屏蔽，不再下载 ios_ipa。
-      - name: Rename artifacts with tag
+      - name: Download Bergamot artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: bergamot-binary
+          path: bergamot
+
+      # ------------------------------------------------------------
+      # Publish reusable Bergamot binary.
+      #
+      # This is a dedicated GitHub Release named:
+      #     bergamot-binaries
+      #
+      # It is NOT tied to the application version tag.
+      # Therefore every future tag can download the same .so.
+      # ------------------------------------------------------------
+
+      - name: Publish Bergamot binary
+        if: hashFiles('bergamot/*.tar.gz') != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cp android_apk/app-release.apk Bilexora_android_${{ github.ref_name }}.apk
+          set -e
 
-      - name: Prepare release notes
-        id: release_notes
-        run: |
-          FULL_HASH="${{ github.sha }}"
-          COMMIT_MSG=$(git log -1 --format=%s)
+          FILE=$(find bergamot \
+            -maxdepth 1 \
+            -type f \
+            -name "*.tar.gz" \
+            | head -n 1)
 
-          # 找到上一个 tag 作为基准；找不到则用项目首个 commit
-          PREV_TAG=$(git tag --sort=-creatordate | tail -n +2 | head -n 1 || true)
-          if [ -z "$PREV_TAG" ]; then
-            RANGE="$(git rev-list --max-parents=0 HEAD)"
-          else
-            RANGE="$PREV_TAG..HEAD"
+          if [ -z "$FILE" ]; then
+            echo "No Bergamot binary found."
+            exit 0
           fi
 
-          # 只保留 feat/fix 开头的提交，按类型分组
-          CHANGELOG="$(git log --no-merges --format='%s' $RANGE | grep -Ei '^(feat|fix)(\(|\)|:)' || true)"
-          FEATURES="$(echo "$CHANGELOG" | grep -Ei '^feat' || true)"
-          FIXES="$(echo "$CHANGELOG" | grep -Ei '^fix' || true)"
+          echo "Publishing:"
+          echo "$FILE"
 
-          BODY="### 本次发布\n"
-          BODY+="- **commit**: \`$FULL_HASH\`\n"
-          BODY+="- **短哈希**: \`${FULL_HASH:0:8}\`\n"
-          BODY+="- **提交信息**: $COMMIT_MSG\n\n"
-          BODY+="---\n"
-          BODY+="### 🚀 新功能 (feat)\n\n"
-          BODY+="$FEATURES\n\n"
-          BODY+="---\n"
-          BODY+="### 🐛 修复 (fix)\n\n"
-          BODY+="$FIXES\n"
+          if ! gh release view bergamot-binaries >/dev/null 2>&1; then
+            echo "Creating dedicated Bergamot release..."
 
-          echo "release_body<<EOF" >> $GITHUB_OUTPUT
-          printf '%b' "$BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+            gh release create bergamot-binaries \
+              --title "Bergamot Native Binaries" \
+              --notes "Reusable native binaries for CI builds." \
+              --prerelease
+          fi
+
+          ASSET_NAME=$(basename "$FILE")
+
+          echo "Uploading asset: $ASSET_NAME"
+
+          gh release upload \
+            bergamot-binaries \
+            "$FILE" \
+            --clobber
+
+      # ------------------------------------------------------------
+      # Rename APK
+      # ------------------------------------------------------------
+
+      - name: Rename APK
         shell: bash
+        run: |
+          set -e
 
-      - name: Create release
+          mv \
+            release/app-release.apk \
+            release/app-${GITHUB_REF_NAME}.apk
+
+      # ------------------------------------------------------------
+      # Generate release notes
+      # ------------------------------------------------------------
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<EOF
+          ## ${GITHUB_REF_NAME}
+
+          Android APK:
+
+          - app-${GITHUB_REF_NAME}.apk
+          EOF
+
+      # ------------------------------------------------------------
+      # Create application release
+      # ------------------------------------------------------------
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Release 标题使用 tag 名（commit MD5 前8位）
-          name: Bilexora ${{ github.ref_name }}
-          body: ${{ steps.release_notes.outputs.release_body }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
           files: |
-            Bilexora_android_*.apk
+            release/app-${{ github.ref_name }}.apk
+```

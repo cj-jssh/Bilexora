@@ -151,21 +151,12 @@ jobs:
         run: |
           SO_DIR="android/app/src/main/jniLibs/arm64-v8a"
           if [ -n "$(ls "$SO_DIR"/libbergamot_translator.so 2>/dev/null)" ]; then
-            echo "✅ 命中预编译 .so, 禁用 bergamot 插件的 native_build 以跳过 C++ 编译"
+            echo "命中预编译 .so, 禁用 bergamot 插件的 native_build 以跳过 C++ 编译"
             # Flutter 读取 .flutter-plugins-dependencies 决定 include 插件;
             # 把 bergamot 的 native_build 置 false -> Flutter/AGP 不触发 externalNativeBuild。
-            python3 - <<'PY'
-import json
-f=".flutter-plugins-dependencies"
-d=json.load(open(f))
-for p in d["plugins"]["android"]:
-    if p["name"]=="bergamot_translator":
-        p["native_build"]=False
-        print("set native_build=False for bergamot_translator")
-json.dump(d, open(f,"w"))
-PY
+            python3 -c "import json;f='.flutter-plugins-dependencies';d=json.load(open(f));[p.update(native_build=False) for p in d['plugins']['android'] if p['name']=='bergamot_translator'];json.dump(d,open(f,'w'));print('bergamot native_build set False')"
           else
-            echo "⚠️ 无预编译 .so, 本次将执行完整原生编译"
+            echo "无预编译 .so, 本次将执行完整原生编译"
           fi
       - name: Build Flutter for Android (arm64 release)
         run: flutter build apk --release --target-platform android-arm64

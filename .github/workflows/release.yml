@@ -195,28 +195,39 @@ jobs:
           done < <(find . -name .git -type f)
           MARIAN="$(cat 3rd_party/marian-dev/.git 2>/dev/null | sed 's#^gitdir: ##')"
           echo "marian gitdir: $MARIAN"
-      # flutter build ios(any form) 在 pbxproj 同时缺少 DEVELOPMENT_TEAM 与
-      # PROVISIONING_PROFILE 时会被 Flutter validator 硬编码拒绝 (“Building a
-      # deployable iOS app requires a selected Development Team”)。
-      # 注入一个占位 DEVELOPMENT_TEAM 即可让 validator 放行; 配合 --no-codesign 传
-      # CODE_SIGNING_ALLOWED=NO, xcodebuild 不会真正签名, 产物保持未签名。
-      # 采用标准 flutter build 流程, 由 xcode_backend.sh 完整嵌入 App.framework /
-      # Flutter.framework / Dart AOT, 避免空壳。
-      - name: Enable unsigned iOS build (placeholder team)
+      # 清理签名配置, 供手动 xcodebuild 禁签名使用。
+      - name: Disable code signing (project cleanup)
         run: |
-          # 注入占位 DEVELOPMENT_TEAM, 规避 Flutter validator 因缺 team 拒绝;
-          # 未签名构建(--no-codesign)不会真正签, 占位 team 无副作用。
-          awk '/CODE_SIGN_STYLE = Automatic;/{print; print "\t\t\t\tDEVELOPMENT_TEAM = 0000000000;"; next}{print}' ios/Runner.xcodeproj/project.pbxproj > tmp.pbxproj && mv tmp.pbxproj ios/Runner.xcodeproj/project.pbxproj
+          # 移除签名配置, 供手动 xcodebuild 禁用签名使用。
+          sed -i '' '/DEVELOPMENT_TEAM/d' ios/Runner.xcodeproj/project.pbxproj
+          perl -i -pe 's/CODE_SIGN_IDENTITY = ".*/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -i -pe 's/"CODE_SIGN_IDENTITY\[[^\"]*\]" = ".*/\"CODE_SIGN_IDENTITY\" = \"\";/g' ios/Runner.xcodeproj/project.pbxproj
           echo "=== 签名相关字段 ==="
-          grep -E "CODE_SIGN_STYLE|DEVELOPMENT_TEAM|CODE_SIGN_IDENTITY|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
-      - name: Build iOS release (no codesign, standard flow)
+          grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
+      # flutter build ios 在无 DEVELOPMENT_TEAM 时会被 validator 硬编码拒绝
+      # (mac.dart _missingDevelopmentTeam), 故用 --config-only 生成工程后
+      # 手动 xcodebuild 绕过 Flutter validator。xcodebuild 会执行 pbxproj 里的
+      # xcode_backend.sh build phase, 嵌入 App.framework / Flutter.framework /
+      # Dart AOT, 配合 CODE_SIGNING_ALLOWED=NO 产出未签名但完整的 Runner.app。
+      - name: Build iOS via xcodebuild (unsigned)
         run: |
-          flutter build ios --release --no-codesign 2>&1 | tee /tmp/ios_build.log
-          EXIT=${PIPESTATUS[0]}
-          echo "=== flutter build 退出码: $EXIT ==="
-          grep -iE "error:|failed" /tmp/ios_build.log | tail -30 || true
-          APP="build/ios/iphoneos/Runner.app"
-          if [ ! -d "$APP" ]; then
+          flutter build ios --release --config-only --no-codesign 2>&1 | tee /tmp/ios_cfg.log || true
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios_dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee /tmp/xcbuild.log
+          XC_EXIT=${PIPESTATUS[0]}
+          echo "=== xcodebuild 退出码: $XC_EXIT ==="
+          grep -iE "error:|failed" /tmp/xcbuild.log | tail -30 || true
+          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
             echo "❌ Runner.app 未生成"
             exit 1
           fi
@@ -226,15 +237,16 @@ jobs:
           ls -la "$APP"
           ls -la "$APP/Frameworks" 2>/dev/null || true
           du -sh "$APP/Frameworks" 2>/dev/null || true
-          ls -la "$APP/Frameworks/App.framework" 2>/dev/null || echo "⚠️ 无 App.framework(可能空壳)"
+          ls -la "$APP/Frameworks/App.framework" 2>/dev/null || echo "no App.framework"
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"
+          EXPANDED_CODE_SIGN_IDENTITY: ""
 
       - name: Create unsigned IPA
         run: |
-          APP="build/ios/iphoneos/Runner.app"
-          if [ ! -d "$APP" ]; then
+          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
             echo "❌ Runner.app 不存在"
             exit 1
           fi
@@ -247,6 +259,7 @@ jobs:
           echo "=== 生成的 IPA ==="
           ls -la Bilexora_ios_*.ipa
           du -sh Bilexora_ios_*.ipa
+
       - name: Upload iOS build
         uses: actions/upload-artifact@v4
         with:

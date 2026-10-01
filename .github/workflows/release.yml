@@ -6,6 +6,8 @@ on:
   push:
     tags:
       - "*"
+  # 支持在 GitHub Actions 界面手动触发构建(排查/复跑更方便)
+  workflow_dispatch:
 
 jobs:
   # 测试 + 静态检查（作为构建的前置门槛）

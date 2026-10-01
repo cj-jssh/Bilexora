@@ -83,6 +83,7 @@ jobs:
         with:
           channel: stable
           flutter-version: '3.47.4'
+          cache: true
       - name: Get Flutter dependencies
         run: flutter pub get
         shell: bash

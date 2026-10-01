@@ -130,15 +130,30 @@ jobs:
           # 新 Clang 对 enum constexpr 初始化报错, 改为 const (不改逻辑)
           sed -i.bak 's/constexpr unicode_script::ScriptType kAnyType =/const unicode_script::ScriptType kAnyType =/' "$FILE"
           grep -n 'kAnyType =' "$FILE" || true
-      - name: Build IPA
-        run: flutter build ipa --release --no-codesign
-        env:
-          CODE_SIGNING_ALLOWED: "NO"
-          CODE_SIGNING_REQUIRED: "NO"
-      - name: Rename & upload IPA
+      - name: Build IPA (config-only + xcodebuild)
         run: |
-          ls -la build/ios/ipa/ || true
-          cp build/ios/ipa/*.ipa Bilexora_ios_${{ github.ref_name }}.ipa
+          # 只生成 Flutter 原生工程配置, 不触发 flutter 的签名检查
+          flutter build ios --release --config-only --no-codesign
+          # 用 xcodebuild 直接归档, 显式禁用签名 (xcodebuild 无 development team 检查)
+          xcodebuild \
+            -project ios/Runner.xcodeproj \
+            -target Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/ios_archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            build
+      - name: Create unsigned IPA
+        run: |
+          APP="$(find build/ios_archive/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
+          echo "app: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/Runner.app
+          zip -q -r Bilexora_ios_${{ github.ref_name }}.ipa Payload
+          ls -la Bilexora_ios_*.ipa
       - name: Upload iOS build
         uses: actions/upload-artifact@v4
         with:

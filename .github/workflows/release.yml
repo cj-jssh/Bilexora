@@ -179,13 +179,22 @@ jobs:
       # marian-dev/ssplit-cpp 仍写 3.5), 会在 configure 时报
       # CMAKE_MINIMUM_REQUIRED 错误。patch podspec 里的 cmake 命令传
       # CMAKE_POLICY_VERSION_MINIMUM=3.5 兼容新 CMake。
-      - name: Patch bergamot podspec for CMake 4
+      - name: Patch bergamot podspec for CMake 4 + pcre2
         run: |
+          # CMake4 兼容已由 job 级 env 解决; 这里禁 pcre2grep: iOS 交叉编译下
+          # pcre2grep 链接 JIT(_jit_compile) 失败。
           PODSPEC="plugins/bergamot_translator/ios/bergamot_translator.podspec"
-          sed -i.bak 's@^cmake -S "@CMAKE_POLICY_VERSION_MINIMUM=3.5 cmake -S "@' "$PODSPEC"
-          echo "=== cmake 命令 ==="
-          grep -n "cmake -S" "$PODSPEC" | head
-      # 修复 vendored marian-dev 的 git_revision.h 生成: 其 CMake 的
+          awk '{
+            if ($0 ~ /^cmake -S/) {
+              print $0;
+              print "  -DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2_SUPPORT_JIT=OFF \\";
+              next
+            } else {
+              print
+            }
+          }' "$PODSPEC" > "$PODSPEC.tmp" && mv "$PODSPEC.tmp" "$PODSPEC"
+          echo "=== 修改后的 cmake 命令 ==="
+          grep -n "cmake -S\|DPCRE2" "$PODSPEC" | head      # 修复 vendored marian-dev 的 git_revision.h 生成: 其 CMake 的
       # add_custom_command DEPENDS <gitdir>/logs/HEAD, 而 GitHub Actions 冷克隆
       # submodule 不含 logs/HEAD, 导致 make 报 “No rule to make target .../logs/HEAD”。
       - name: Fix marian-dev git logs/HEAD (CI cold submodule)

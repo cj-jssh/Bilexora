@@ -179,22 +179,24 @@ jobs:
       # marian-dev/ssplit-cpp 仍写 3.5), 会在 configure 时报
       # CMAKE_MINIMUM_REQUIRED 错误。patch podspec 里的 cmake 命令传
       # CMAKE_POLICY_VERSION_MINIMUM=3.5 兼容新 CMake。
-      - name: Patch bergamot podspec for CMake 4 + pcre2
+      - name: Patch ssplit pcre2 build flags (disable pcre2grep)
         run: |
-          # CMake4 兼容已由 job 级 env 解决; 这里禁 pcre2grep: iOS 交叉编译下
-          # pcre2grep 链接 JIT(_jit_compile) 失败。
-          PODSPEC="plugins/bergamot_translator/ios/bergamot_translator.podspec"
+          # ssplit-cpp 用 ExternalProject 独立构建 pcre2, 顶层 -D 参数不会传入。
+          # 在 FindPCRE2.cmake 的 Internal PROJECT configure 选项里追加禁用
+          # pcre2grep, 避免 iOS 交叉编译下 pcre2grep 链接 JIT(_jit_compile) 失败。
+          F="plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/ssplit-cpp/cmake/FindPCRE2.cmake"
           awk '{
-            if ($0 ~ /^cmake -S/) {
+            if ($0 ~ /PCRE2_JIT_OPTION/ && !done) {
               print $0;
-              print "  -DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2_SUPPORT_JIT=OFF \\";
+              print "    -DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2GREP_SUPPORT_JIT=OFF";
+              done=1;
               next
             } else {
               print
             }
-          }' "$PODSPEC" > "$PODSPEC.tmp" && mv "$PODSPEC.tmp" "$PODSPEC"
-          echo "=== 修改后的 cmake 命令 ==="
-          grep -n "cmake -S\|DPCRE2" "$PODSPEC" | head      # 修复 vendored marian-dev 的 git_revision.h 生成: 其 CMake 的
+          }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+          echo "=== FindPCRE2.cmake 修改后 ==="
+          grep -n "PCRE2_BUILD_PCRE2GREP\|PCRE2_JIT_OPTION\|SUPPORT_JIT" "$F" | head      # 修复 vendored marian-dev 的 git_revision.h 生成: 其 CMake 的
       # add_custom_command DEPENDS <gitdir>/logs/HEAD, 而 GitHub Actions 冷克隆
       # submodule 不含 logs/HEAD, 导致 make 报 “No rule to make target .../logs/HEAD”。
       - name: Fix marian-dev git logs/HEAD (CI cold submodule)

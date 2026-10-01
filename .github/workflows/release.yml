@@ -147,6 +147,13 @@ jobs:
     runs-on: "macos-latest"
     permissions:
       contents: read
+    # CMake 4.x 移除了对 cmake_minimum_required < 3.5 的兼容(vendored marian-dev /
+    # ssplit-cpp 仍写 3.5)。设为 job 级 env, 使 xcodebuild 及 pcre2 等子 configure
+    # 都继承, 不再各自报 CMAKE_MINIMUM_REQUIRED 错。
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      CODE_SIGNING_ALLOWED: "NO"
+      CODE_SIGNING_REQUIRED: "NO"
     steps:
       - name: Clone repository
         uses: actions/checkout@v4
@@ -212,6 +219,20 @@ jobs:
       - name: Build iOS via xcodebuild (unsigned)
         run: |
           flutter build ios --release --config-only --no-codesign 2>&1 | tee /tmp/ios_cfg.log || true
+          # pod install 已由 --config-only 触发, 现在补齐所有 submodule git 的
+          # logs/HEAD(marian-dev CMake 生成 git_revision.h 需要), 否则 make 报
+          # “No rule to make target .../logs/HEAD”。用 git 解析绝对 gitdir 最可靠。
+          while IFS= read -r gf; do
+            G="$(git -C "$(dirname "$gf")" rev-parse --absolute-git-dir 2>/dev/null)" || continue
+            if [ -d "$G" ] && [ ! -f "$G/logs/HEAD" ]; then
+              mkdir -p "$G/logs"
+              echo > "$G/logs/HEAD"
+              echo "created $G/logs/HEAD"
+            fi
+          done < <(find . plugins ios -name .git -type f 2>/dev/null)
+          echo "=== marian gitdir logs check ==="
+          MA="$(git -C plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/marian-dev rev-parse --absolute-git-dir 2>/dev/null)"
+          echo "marian gitdir: $MA"; ls -la "$MA/logs/HEAD" 2>/dev/null || true
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \

@@ -157,19 +157,24 @@ jobs:
           grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
       - name: Build IPA (flutter build + fallback)
         run: |
-          # flutter build 可能仍误报 team, 用 set +e 忽略; 只要 Runner.app 生成了就算成功
+          # 清理可能的构建产物, 避免 stale 文件干扰
+          rm -rf build/ios
+          # flutter build 可能因签名误报退出失败, 但 Runner.app 若生成则视为成功
           set +e
-          flutter build ios --release --no-codesign
+          flutter build ios --release --no-codesign 2>&1 | tee /tmp/ios_build.log
           set -e
           if [ ! -d build/ios/iphoneos/Runner.app ]; then
-            echo "=== Runner.app 不存在, fallback 到 xcodebuild workspace ==="
+            echo "=== Runner.app 未生成, 显示真实 error 行 ==="
+            grep -iE "error:|failed|\berror\b" /tmp/ios_build.log | tail -30 || true
+            echo "=== fallback 到 xcodebuild workspace ==="
             cd ios
             xcodebuild -workspace Runner.xcworkspace -scheme Runner \
               -configuration Release -sdk iphoneos -destination 'generic/platform=ios' \
-              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee /tmp/xcbuild.log
             cd ..
+            grep -iE "error:|failed" /tmp/xcbuild.log | tail -30 || true
           fi
-          ls -la build/ios/iphoneos/Runner.app
+          ls -la build/ios/iphoneos/Runner.app || echo "Runner.app 不存在"
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"

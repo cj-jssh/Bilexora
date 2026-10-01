@@ -244,21 +244,22 @@ jobs:
           echo "=== marian gitdir logs check ==="
           MA="$(git -C plugins/bergamot_translator/third_party/bergamot-translator/3rd_party/marian-dev rev-parse --absolute-git-dir 2>/dev/null)"
           echo "marian gitdir: $MA"; ls -la "$MA/logs/HEAD" 2>/dev/null || true
+          cd ios
           xcodebuild \
-            -workspace ios/Runner.xcworkspace \
+            -workspace Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build/ios_dd \
+            -archivePath "$PWD/build/Runner.xcarchive" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee /tmp/xcbuild.log
+            archive 2>&1 | tee /tmp/xcbuild.log
+          cd ..
           XC_EXIT=${PIPESTATUS[0]}
           echo "=== xcodebuild 退出码: $XC_EXIT ==="
           grep -iE "error:|failed" /tmp/xcbuild.log | tail -30 || true
-          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
+          APP="ios/build/Runner.xcarchive/Products/Applications/Runner.app"
           if [ -z "$APP" ] || [ ! -d "$APP" ]; then
             echo "❌ Runner.app 未生成"
             exit 1
@@ -277,8 +278,8 @@ jobs:
 
       - name: Create unsigned IPA
         run: |
-          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
-          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+          APP="ios/build/Runner.xcarchive/Products/Applications/Runner.app"
+          if [ ! -d "$APP" ]; then
             echo "❌ Runner.app 不存在"
             exit 1
           fi

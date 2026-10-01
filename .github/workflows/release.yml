@@ -271,6 +271,7 @@ jobs:
           time flutter build apk \
             --release \
             --target-platform android-arm64 \
+            --no-pub \
             --verbose
 
       # ------------------------------------------------------------

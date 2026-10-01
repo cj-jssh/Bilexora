@@ -1,7 +1,8 @@
 ---
 name: "release"
 
-# 打 tag（推送到远程触发）。tag 由 tools/release.sh 生成 = commit MD5 前 8 位
+# 打 tag（推送到远程触发）。tag 名 = commit MD5 前 8 位
+# 可用 git release 一条命令发版（git 全局别名, 只打标+推送, 不 add/commit）
 on:
   push:
     tags:
@@ -106,9 +107,7 @@ jobs:
           org.gradle.parallel=true
           org.gradle.daemon=true
           EOF
-      # 拆分缓存: gradle 依赖 与 bergamot 原生产物(.cxx) 分开, 各自独立命中。
-      # 避免把 5.3GB 的 .cxx 塞进单一超大条目, 降低 cache restore/upload 耗时,
-      # 也让不涉及 C++ 的改动不会误触发原生全量重编。
+      # gradle/pub 依赖缓存(与原生 .so 缓存分离, 各自独立命中)
       - uses: actions/cache@v4
         with:
           path: |
@@ -117,13 +116,6 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
-      - name: Cache bergamot native build output (.cxx)
-        uses: actions/cache@v4
-        with:
-          path: plugins/bergamot_translator/android/.cxx
-          key: ${{ runner.os }}-bergamot-cxx-${{ hashFiles('plugins/bergamot_translator/src/**', 'plugins/bergamot_translator/android/build.gradle', 'plugins/bergamot_translator/third_party/**') }}
-          restore-keys: |
-            ${{ runner.os }}-bergamot-cxx-
       - name: Cache Flutter & pub dependencies
         uses: actions/cache@v4
         with:
@@ -131,12 +123,68 @@ jobs:
           key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
           restore-keys: |
             ${{ runner.os }}-pub-
-      # Release 只构建 arm64-v8a: 手机(真机)几乎都是 arm64。
-      # 砍掉 x86_64 使 bergamot C++ 编译耗时减半(CI 提速的主要来源)。
-      # 如需模拟器支持可改回不带 --target-platform 或单独加 x86_64 job。
+      # ---- bergamot 原生预编译缓存 (关键提速) ----
+      # 思路: bergamot 原生依赖 commit 固定(96c0fcca / cld2 b56fa78a), 产物理论上不变。
+      # 与其依赖脆弱的 .cxx(跨 runner 换机器后 Gradle 仍全量重编), 不如把最终
+      # libbergamot_translator.so 直接作产物缓存: 命中则放进 jniLibs 并关闭插件 native_build,
+      # 让 flutter build 完全跳过原生 C++ 编译。未命中则本次正常编译, 事后把 .so 提取入库。
+      # 指纹 = 固定原生版本, 不随 git tag/commit 变化, 同版本 release 稳定命中。
+      - name: Compute bergamot native fingerprint
+        id: bm
+        shell: bash
+        run: |
+          # 原生依赖 commit(见 plugins/bergamot_translator 内 submodule gitlink)
+          PAYLOAD="96c0fcca c4c87de6 b56fa78a"
+          MD5=$(printf '%s' "$PAYLOAD" | md5sum | cut -d' ' -f1)
+          echo "md5=${MD5:0:12}"
+          echo "md5=${MD5:0:12}" >> "$GITHUB_OUTPUT"
+      - name: Restore prebuilt bergamot .so
+        id: restore-so
+        uses: actions/cache@v4
+        with:
+          path: android/app/src/main/jniLibs
+          key: bergamot-so-${{ steps.bm.outputs.md5 }}
+          restore-keys: |
+            bergamot-so-
+      - name: Skip bergamot native build if .so cached
+        shell: bash
+        run: |
+          SO_DIR="android/app/src/main/jniLibs/arm64-v8a"
+          if [ -n "$(ls "$SO_DIR"/libbergamot_translator.so 2>/dev/null)" ]; then
+            echo "✅ 命中预编译 .so, 禁用 bergamot 插件的 native_build 以跳过 C++ 编译"
+            # Flutter 读取 .flutter-plugins-dependencies 决定 include 插件;
+            # 把 bergamot 的 native_build 置 false -> Flutter/AGP 不触发 externalNativeBuild。
+            python3 - <<'PY'
+import json
+f=".flutter-plugins-dependencies"
+d=json.load(open(f))
+for p in d["plugins"]["android"]:
+    if p["name"]=="bergamot_translator":
+        p["native_build"]=False
+        print("set native_build=False for bergamot_translator")
+json.dump(d, open(f,"w"))
+PY
+          else
+            echo "⚠️ 无预编译 .so, 本次将执行完整原生编译"
+          fi
       - name: Build Flutter for Android (arm64 release)
         run: flutter build apk --release --target-platform android-arm64
         shell: bash
+      # 本次若为首次/原生变化编译, 把产出的 .so 存进预编译缓存, 供后续 release 复用。
+      # 只有当 restore 未命中时才会执行完整编译并走到导出; 命中时 jniLibs 已存在无需处理。
+      - name: Export prebuilt bergamot .so
+        shell: bash
+        run: |
+          DEST="android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$DEST"
+          SO=$(find plugins build -path '*arm64*' -name 'libbergamot_translator.so' 2>/dev/null | head -n1)
+          if [ -z "$SO" ]; then
+            echo "❌ 未找到 libbergamot_translator.so"
+            exit 0
+          fi
+          cp "$SO" "$DEST/libbergamot_translator.so"
+          echo "已导出 $SO -> $DEST/libbergamot_translator.so"
+          ls -la "$DEST"
       - name: Upload android APK
         uses: actions/upload-artifact@v4
         with:

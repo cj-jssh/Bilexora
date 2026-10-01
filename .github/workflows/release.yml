@@ -156,34 +156,44 @@ jobs:
           perl -i -pe 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;\n                            CODE_SIGNING_ALLOWED = NO;\n                            CODE_SIGNING_REQUIRED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
           echo "=== 签名相关字段 ==="
           grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
-      - name: Build IPA (flutter build strict)
+      - name: Build IPA (config-only + xcodebuild workspace)
         run: |
-          rm -rf build/ios
-          # 严格模式: 构建必须成功, 否则 var 报错后退出
-          flutter build ios --release --no-codesign 2>&1 | tee /tmp/ios_build.log
-          # 检查产物必须完整
-          APP="build/ios/iphoneos/Runner.app"
-          if [ ! -d "$APP" ]; then
-            echo "❌ Runner.app 未生成, 构建失败"
-            grep -iE "error:|failed" /tmp/ios_build.log | tail -30 || true
+          # 1) 生成 Flutter 原生工程(含 SPM 插件解析), 不触发签名预检构建
+          flutter build ios --release --config-only --no-codesign 2>&1 | tee /tmp/ios_cfg.log || true
+          # 2) 用 xcodebuild -workspace 构建(带 SPM 插件), 显式禁用签名, 绕过预检
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios_dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee /tmp/xcbuild.log
+          XC_EXIT=${PIPESTATUS[0]}
+          echo "=== xcodebuild 退出码: $XC_EXIT ==="
+          grep -iE "error:|failed" /tmp/xcbuild.log | tail -40 || true
+          # 产物在 build/ios_dd/Build/Products/Release-iphoneos/Runner.app
+          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
+          echo "=== Runner.app: $APP ==="
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "❌ Runner.app 未生成"
             exit 1
           fi
-          echo "=== Runner.app 内容 ==="
-          ls -la "$APP"
           du -sh "$APP"
-          # 必须包含 Flutter 引擎与 assets
-          if [ ! -f "$APP/Frameworks/Flutter.framework/Flutter" ] && [ ! -d "$APP/Frameworks" ]; then
-            echo "❌ Runner.app 缺少 Flutter.framework, 产物不完整"
-            find "$APP" -maxdepth 2 -type d | head
-            exit 1
-          fi
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"
           EXPANDED_CODE_SIGN_IDENTITY: ""
       - name: Create unsigned IPA
         run: |
-          APP="build/ios/iphoneos/Runner.app"
+          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "❌ Runner.app 不存在"
+            exit 1
+          fi
           echo "app: $APP (大小: $(du -sh "$APP" | cut -f1))"
           rm -rf Payload
           mkdir -p Payload

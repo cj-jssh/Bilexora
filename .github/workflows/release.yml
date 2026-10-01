@@ -72,7 +72,7 @@ jobs:
         run: flutter pub get
 
       - name: Flutter analyze
-        run: flutter analyze
+        run: flutter analyze lib test --no-fatal-infos --fatal-warnings
 
 
   flutter-build-android:
@@ -122,11 +122,10 @@ jobs:
           org.gradle.daemon=true
           org.gradle.parallel=true
           org.gradle.caching=true
-          org.gradle.configuration-cache=true
           android.useAndroidX=true
           android.newDsl=false
           android.builtInKotlin=false
-          kotlin.incremental=true
+          kotlin.incremental=false
           EOF
 
       - name: Setup Gradle

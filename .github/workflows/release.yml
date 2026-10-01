@@ -101,17 +101,36 @@ jobs:
           org.gradle.parallel=true
           org.gradle.daemon=true
           EOF
+      # 拆分缓存: gradle 依赖 与 bergamot 原生产物(.cxx) 分开, 各自独立命中。
+      # 避免把 5.3GB 的 .cxx 塞进单一超大条目, 降低 cache restore/upload 耗时,
+      # 也让不涉及 C++ 的改动不会误触发原生全量重编。
       - uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            plugins/bergamot_translator/android/.cxx
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'plugins/bergamot_translator/**') }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
-      - name: Build Flutter for Android
-        run: flutter build apk --release
+      - name: Cache bergamot native build output (.cxx)
+        uses: actions/cache@v4
+        with:
+          path: plugins/bergamot_translator/android/.cxx
+          key: ${{ runner.os }}-bergamot-cxx-${{ hashFiles('plugins/bergamot_translator/src/**', 'plugins/bergamot_translator/android/build.gradle', 'plugins/bergamot_translator/third_party/**') }}
+          restore-keys: |
+            ${{ runner.os }}-bergamot-cxx-
+      - name: Cache Flutter & pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pub-
+      # Release 只构建 arm64-v8a: 手机(真机)几乎都是 arm64。
+      # 砍掉 x86_64 使 bergamot C++ 编译耗时减半(CI 提速的主要来源)。
+      # 如需模拟器支持可改回不带 --target-platform 或单独加 x86_64 job。
+      - name: Build Flutter for Android (arm64 release)
+        run: flutter build apk --release --target-platform android-arm64
         shell: bash
       - name: Upload android APK
         uses: actions/upload-artifact@v4
@@ -148,50 +167,46 @@ jobs:
           grep -n 'kAnyType =' "$FILE" || true
       - name: Disable code signing (project cleanup)
         run: |
-          # Flutter 预检(validateXcodeProject)会在 xcodebuild 前读 pbxproj, 发现签名配置
-          # 未禁用就误报 “Development Team required”。
-          # 参考已验证方案: 删除 team / 清空 id / 显式禁用签名 (不改 Manual)
+          # 关键：不要把 CODE_SIGN_STYLE 改成 Manual！
+          # Manual 在没有 provisioning profile 时会让 xcodebuild 失败, Flutter 随后
+          # 误报 “Building a deployable iOS app requires a selected Development Team”。
+          # 保持 Automatic, 只删除 team / 清空 identity。--no-codesign 会自动向
+          # xcodebuild 传 CODE_SIGNING_ALLOWED=NO, 从而完整嵌入 App.framework /
+          # Flutter.framework / Dart AOT snapshot(不会产出空壳 Runner.app)。
           sed -i '' '/DEVELOPMENT_TEAM/d' ios/Runner.xcodeproj/project.pbxproj
           perl -i -pe 's/CODE_SIGN_IDENTITY = ".*/CODE_SIGN_IDENTITY = "";/g' ios/Runner.xcodeproj/project.pbxproj
           perl -i -pe 's/"CODE_SIGN_IDENTITY\[[^\"]*\]" = ".*/\"CODE_SIGN_IDENTITY\" = \"\";/g' ios/Runner.xcodeproj/project.pbxproj
-          perl -i -pe 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;\n                            CODE_SIGNING_ALLOWED = NO;\n                            CODE_SIGNING_REQUIRED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -i -pe 's/CODE_SIGNING_ALLOWED = YES;/CODE_SIGNING_ALLOWED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -i -pe 's/CODE_SIGNING_REQUIRED = YES;/CODE_SIGNING_REQUIRED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
           echo "=== 签名相关字段 ==="
           grep -E "CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_" ios/Runner.xcodeproj/project.pbxproj || true
-      - name: Build IPA (config-only + xcodebuild workspace)
+      - name: Build iOS release (no codesign)
         run: |
-          # 1) 生成 Flutter 原生工程(含 SPM 插件解析), 不触发签名预检构建
-          flutter build ios --release --config-only --no-codesign 2>&1 | tee /tmp/ios_cfg.log || true
-          # 2) 用 xcodebuild -workspace 构建(带 SPM 插件), 显式禁用签名, 绕过预检
-          xcodebuild \
-            -workspace ios/Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build/ios_dd \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee /tmp/xcbuild.log
-          XC_EXIT=${PIPESTATUS[0]}
-          echo "=== xcodebuild 退出码: $XC_EXIT ==="
-          grep -iE "error:|failed" /tmp/xcbuild.log | tail -40 || true
-          # 产物在 build/ios_dd/Build/Products/Release-iphoneos/Runner.app
-          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
-          echo "=== Runner.app: $APP ==="
-          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+          # 让 flutter/xcode_backend.sh 走完整流程: 编译 Dart AOT, 嵌入 App.framework /
+          # Flutter.framework / flutter_assets, 产出完整 Runner.app(非空壳)。
+          flutter build ios --release --no-codesign 2>&1 | tee /tmp/ios_build.log
+          EXIT=${PIPESTATUS[0]}
+          echo "=== flutter build 退出码: $EXIT ==="
+          grep -iE "error:|failed" /tmp/ios_build.log | tail -40 || true
+          APP="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP" ]; then
             echo "❌ Runner.app 未生成"
             exit 1
           fi
+          echo "=== Runner.app: $APP ==="
           du -sh "$APP"
+          echo "=== Runner.app 内容(校验非空壳) ==="
+          ls -la "$APP"
+          ls -la "$APP/Frameworks" 2>/dev/null || true
+          du -sh "$APP/Frameworks" 2>/dev/null || true
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"
           EXPANDED_CODE_SIGN_IDENTITY: ""
       - name: Create unsigned IPA
         run: |
-          APP="$(find build/ios_dd -name 'Runner.app' -type d 2>/dev/null | head -1)"
-          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+          APP="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP" ]; then
             echo "❌ Runner.app 不存在"
             exit 1
           fi

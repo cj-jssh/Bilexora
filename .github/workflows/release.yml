@@ -106,7 +106,8 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+            plugins/bergamot_translator/android/.cxx
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'plugins/bergamot_translator/**') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
       - name: Build Flutter for Android

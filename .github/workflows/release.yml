@@ -86,6 +86,20 @@ jobs:
       - name: Get Flutter dependencies
         run: flutter pub get
         shell: bash
+      - name: Optimize Gradle memory for CI
+        run: |
+          # GitHub Actions ubuntu 仅 ~7G 内存, 项目 -Xmx8G 超配会导致 OOM/极慢
+          # CI 上临时改用适配值, 不修改源文件(本地开发不变)
+          cat > android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m -XX:+HeapDumpOnOutOfMemoryError
+          android.useAndroidX=true
+          android.newDsl=false
+          android.builtInKotlin=false
+          kotlin.incremental=false
+          org.gradle.caching=true
+          org.gradle.parallel=true
+          org.gradle.daemon=true
+          EOF
       - uses: actions/cache@v4
         with:
           path: |
@@ -137,18 +151,19 @@ jobs:
           # 用 xcodebuild 直接归档, 显式禁用签名 (xcodebuild 无 development team 检查)
           xcodebuild \
             -project ios/Runner.xcodeproj \
-            -target Runner \
+            -scheme Runner \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build/ios_archive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY= \
             DEVELOPMENT_TEAM= \
-            build
+            archive
       - name: Create unsigned IPA
         run: |
-          APP="$(find build/ios_archive/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
+          APP="$(find build/ios_archive -name '*.app' -type d | grep -v '.swiftmodule' | head -1)"
           echo "app: $APP"
           mkdir -p Payload
           cp -R "$APP" Payload/Runner.app

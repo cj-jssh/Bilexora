@@ -118,6 +118,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _intensivePlaying = false;
   double _intensiveRate = 0.4;
   final FlutterTts _tts = FlutterTts();
+  // 初始化/切换句子时压制 stop 触发的 completion 回调, 避免误自动连播
+  bool _suppressIntensiveCompletion = false;
 
   @override
   void initState() {
@@ -132,6 +134,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   void _onIntensiveComplete() {
     if (!mounted || !_intensiveMode || _intensiveSentences.isEmpty) return;
+    // 初始化/切换句子时 stop 也会触发 completion, 需跳过
+    if (_suppressIntensiveCompletion) {
+      _suppressIntensiveCompletion = false;
+      return;
+    }
+    // 已暂停则不再自动连播（stop 暂停也会触发 completion）
+    if (!_intensivePlaying) return;
     if (ref.read(sentenceListeningAutoPlayProvider)) {
       _goToNextIntensiveSentence();
     } else {
@@ -365,9 +374,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     try {
       final s = _intensiveSentences[_intensiveSentenceIndex
           .clamp(0, _intensiveSentences.length - 1)];
+      // iOS: 显式配置音频会话, 确保静音开关拨到静音也能从扬声器发声
+      if (Platform.isIOS) {
+        await _tts.setSharedInstance(true);
+        await _tts.awaitSpeakCompletion(true);
+        await _tts.setIosAudioCategory(
+          IosTextToSpeechAudioCategory.playback,
+          const [IosTextToSpeechAudioCategoryOptions.defaultToSpeaker],
+          IosTextToSpeechAudioMode.voicePrompt,
+        );
+      }
       await _tts.setLanguage(_bookLanguage == 'zh' ? 'zh-CN' : 'en-US');
       await _tts.setSpeechRate(_intensiveRate);
       await _tts.setVolume(1.0);
+      // 停止上次播放时压制其 completion 回调，避免误触发连播
+      _suppressIntensiveCompletion = true;
+      await _tts.stop();
       await _tts.speak(s.text);
       // 完成后的连播由 _onIntensiveComplete 处理；这里不置 false，
       // 以免与 completion handler 的 setState 竞争。
@@ -394,10 +416,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void _goToPrevIntensiveSentence() {
     if (_intensiveSentenceIndex <= 0) {
       // 已在首句：重新朗读当前句
+      _suppressIntensiveCompletion = true;
       _tts.stop();
       _playIntensiveSentence();
       return;
     }
+    _suppressIntensiveCompletion = true;
     _tts.stop();
     setState(() {
       _intensiveSentenceIndex--;
@@ -415,6 +439,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       setState(() => _intensivePlaying = false);
       return;
     }
+    _suppressIntensiveCompletion = true;
     _tts.stop();
     setState(() {
       _intensiveSentenceIndex++;
@@ -494,8 +519,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               GestureDetector(
                 onTap: () {
                   if (_intensivePlaying) {
-                    _tts.stop();
+                    // 先标记暂停, 再 stop, 这样 stop 触发的 completion 回调会因
+                    // _intensivePlaying==false 而跳过自动连播
                     setState(() => _intensivePlaying = false);
+                    _tts.stop();
                   } else {
                     _playIntensiveSentence();
                   }

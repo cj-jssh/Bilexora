@@ -403,6 +403,13 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('正在翻译 ${allSentences.length} 句...'), behavior: SnackBarBehavior.floating, duration: const Duration(seconds: 2)));
+    // 开始通知（结束通知在完成/失败/取消时发送，形成有头有尾的提示）
+    LibraryDatabase().addNotification(
+      type: 'translation_started',
+      title: '开始翻译',
+      body: '「${book.title}」开始翻译 ${allSentences.length} 句',
+      bookId: book.id,
+    );
 
     try {
       if (active.id == 'local_bergamot') {

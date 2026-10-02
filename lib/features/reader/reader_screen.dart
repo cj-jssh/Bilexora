@@ -66,6 +66,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   // 翻译数据：sentence globalIndex → 译文
   final Map<int, String> _translationMap = {};
   String _bookLanguage = 'en';
+  // 已加载译文的语言（避免每次追加章节都全量重读翻译文件，造成滚动卡顿）
+  final Set<String> _translationLoadedLangs = {};
+  // content.dat 每章真实句数（惰性计算一次并缓存，避免滚动时反复解析全书）
+  Future<List<int>>? _perChCountsFuture;
 
   // 点击展示模式（句子级：key = sentence.charOffset）
   final Set<int> _revealedSentences = {};
@@ -287,24 +291,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
 
     // 加载翻译：增量合并，不覆盖已有数据
-    final libraryPath = ref.read(libraryPathProvider);
-    final fileManager = TranslationFileManager(
-      p.join(libraryPath, 'books', widget.bookId),
-      bookId: widget.bookId,
-    );
-    final learningLang = ref.read(bilingualLearningLanguageProvider);
-    final perChCounts = <int>[];
-    for (int i = 0; i < (_reader?.chapterCount ?? 0); i++) {
-      final ch = _reader?.readChapter(i);
-      perChCounts.add(ch?.sentenceCount ?? 0);
-    }
-    fileManager.loadTranslation(learningLang, perChapterSentenceCounts: perChCounts).then((extMap) {
-      if (mounted && extMap.isNotEmpty) {
-        setState(() { _translationMap.addAll(extMap); });
-      }
-    }).catchError((Object e) {
-      debugPrint('[翻译] 加载译文文件失败: $e');
-    });
+    _loadTranslations();
 
     setState(() {
       _currentChapter = chapter;
@@ -337,14 +324,56 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
 
     _updateLastReadAt().then((_) { if (mounted) _invalidateHomeProviders(); });
+  }
 
-    // 预读前后各 _preloadCount 章（缓存到 ContentDatReader 内部）
-    for (int i = 1; i <= _preloadCount; i++) {
-      final next = clamped + i;
-      if (next < _chapterCount) Future.microtask(() => reader.readChapter(next));
-      final prev = clamped - i;
-      if (prev >= 0) Future.microtask(() => reader.readChapter(prev));
-    }
+  /// 惰性计算 content.dat 每章句数，缓存结果避免滚动时反复解析全书
+  Future<List<int>> _ensurePerChapterCounts() {
+    return _perChCountsFuture ??= () async {
+      final reader = _reader;
+      final counts = <int>[];
+      for (int i = 0; i < (reader?.chapterCount ?? 0); i++) {
+        counts.add(reader?.readChapter(i)?.sentenceCount ?? 0);
+      }
+      return counts;
+    }();
+  }
+
+  /// 加载译文。每种语言只加载一次，避免每次滚动追加章节都全量重读翻译文件。
+  ///
+  /// 原文语言 ≠ 母语时（本地引擎会把译文写到母语），书库「翻译全本」的结果
+  /// 存在 resolveLocalDirection 得到的目标语言下；而 AI 引擎写到学习语言。
+  /// 因此两个语言都尝试加载、合并映射，确保译文能显示出来。
+  void _loadTranslations() {
+    final reader = _reader;
+    if (reader == null) return;
+    final libraryPath = ref.read(libraryPathProvider);
+    final fm = TranslationFileManager(
+      p.join(libraryPath, 'books', widget.bookId),
+      bookId: widget.bookId,
+    );
+    final nativeLang = ref.read(nativeLanguageProvider);
+    final learningLang = ref.read(bilingualLearningLanguageProvider);
+    final (_, localTarget) = resolveLocalDirection(
+      bookLanguage: _bookLanguage,
+      nativeLanguage: nativeLang,
+      learningLanguage: learningLang,
+    );
+    final langs = {learningLang, localTarget};
+    _ensurePerChapterCounts().then((perChCounts) async {
+      for (final lang in langs) {
+        if (_translationLoadedLangs.contains(lang)) continue;
+        _translationLoadedLangs.add(lang);
+        try {
+          final extMap = await fm.loadTranslation(
+              lang, perChapterSentenceCounts: perChCounts);
+          if (mounted && extMap.isNotEmpty) {
+            setState(() => _translationMap.addAll(extMap));
+          }
+        } catch (e) {
+          debugPrint('[翻译] 加载[$lang]译文文件失败: $e');
+        }
+      }
+    });
   }
 
   /// 安全释放方向锁，防止锁泄漏导致滚动加载永久卡死
@@ -1562,6 +1591,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final priority = engines.indexOf(active);
     final fm = TranslationFileManager(
         p.join(libraryPath, 'books', widget.bookId), bookId: widget.bookId);
+
+    // 开始通知（结束通知在完成/失败时发送，形成有头有尾的提示）
+    LibraryDatabase().addNotification(
+      type: 'translation_started',
+      title: '开始翻译',
+      body: '「${_bookMeta?.title ?? ''}」开始翻译 ${allSentences.length} 句',
+      bookId: widget.bookId,
+    );
 
     try {
       if (isLocalEngine) {

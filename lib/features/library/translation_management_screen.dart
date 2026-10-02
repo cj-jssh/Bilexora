@@ -125,14 +125,12 @@ class TranslationManagementScreen extends ConsumerWidget {
     final active = tasks.values
         .where((t) => t.status == TranslationTaskStatus.translating || t.status == TranslationTaskStatus.queued)
         .toList();
-    final completedTasks = tasks.values
-        .where((t) => t.status == TranslationTaskStatus.completed)
-        .toList();
     final failed = tasks.values
         .where((t) => t.status == TranslationTaskStatus.failed)
         .toList();
 
-    // 从 SQLite 读取持久化的翻译记录
+    // 从 SQLite 读取持久化的翻译记录。
+    // 完成即落库，因此管理页统一由持久化记录展示「已完成」，无需内存任务。
     // 进入页面时刷新一次：磁盘上可能有未持久化状态的译文文件（如取消翻译后的已完成部分），
     // 需要重新扫描补全 DB 记录；invalidate 会触发重扫，已有记录也不会重复插入（自动补全有判重）
     Future.microtask(() => ref.invalidate(scannedTranslationsProvider));
@@ -144,10 +142,9 @@ class TranslationManagementScreen extends ConsumerWidget {
         data: (persisted) {
           final hasActive = active.isNotEmpty;
           final hasPersisted = persisted.isNotEmpty;
-          final hasCompleted = completedTasks.isNotEmpty;
           final hasFailed = failed.isNotEmpty;
 
-          if (!hasActive && !hasPersisted && !hasCompleted && !hasFailed) {
+          if (!hasActive && !hasPersisted && !hasFailed) {
             return const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
               Icon(Icons.translate, size: 64, color: Colors.grey),
               SizedBox(height: 16),
@@ -164,12 +161,9 @@ class TranslationManagementScreen extends ConsumerWidget {
               ...active.map((t) => _ActiveTaskCard(task: t)),
               const SizedBox(height: 8),
             ],
-            // 已完成（内存中的）+ 持久化的
-            if (hasCompleted || hasPersisted) ...[
-              _SectionHeader(title: '已完成', count: completedTasks.length + persisted.length),
-              // 先展示内存中本次会话完成的（可能有实时进度差异）
-              ...completedTasks.map((t) => _CompletedTaskCard(task: t)),
-              // 再展示持久化的（历史翻译）
+            // 已完成（全部来自持久化记录）
+            if (hasPersisted) ...[
+              _SectionHeader(title: '已完成', count: persisted.length),
               ...persisted.map((pt) => _PersistedTaskCard(persisted: pt)),
               const SizedBox(height: 8),
             ],
@@ -184,10 +178,9 @@ class TranslationManagementScreen extends ConsumerWidget {
         error: (e, _) {
           // 即使扫描失败也展示内存中的数据
           final hasActive = active.isNotEmpty;
-          final hasCompleted = completedTasks.isNotEmpty;
           final hasFailed = failed.isNotEmpty;
 
-          if (!hasActive && !hasCompleted && !hasFailed) {
+          if (!hasActive && !hasFailed) {
             return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
               Icon(Icons.error_outline, size: 64, color: Colors.grey),
               const SizedBox(height: 16),
@@ -201,11 +194,7 @@ class TranslationManagementScreen extends ConsumerWidget {
               ...active.map((t) => _ActiveTaskCard(task: t)),
               const SizedBox(height: 8),
             ],
-            if (hasCompleted) ...[
-              _SectionHeader(title: '已完成', count: completedTasks.length),
-              ...completedTasks.map((t) => _CompletedTaskCard(task: t)),
-              const SizedBox(height: 8),
-            ],
+
             if (hasFailed) ...[
               _SectionHeader(title: '失败', count: failed.length),
               ...failed.map((t) => _FailedTaskCard(task: t)),
@@ -281,25 +270,6 @@ class _ActiveTaskCard extends ConsumerWidget {
             ),
           ],
         ]),
-      ),
-    );
-  }
-}
-
-class _CompletedTaskCard extends ConsumerWidget {
-  final TranslationTask task;
-  const _CompletedTaskCard({required this.task});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: ListTile(
-        leading: const Icon(Icons.check_circle, color: Colors.green),
-        title: Text(task.bookTitle),
-        subtitle: Text('翻译完成 ${task.totalSentences} 句', style: TextStyle(fontSize: 13, color: Theme.of(context).colorScheme.outline)),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: () => context.push('/reader/${task.bookId}'),
       ),
     );
   }

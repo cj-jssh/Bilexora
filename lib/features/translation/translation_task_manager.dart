@@ -3,7 +3,8 @@ import '../../core/database/library_database.dart';
 import 'local_translation_service.dart';
 
 /// 翻译任务状态
-enum TranslationTaskStatus { queued, translating, completed, failed, cancelled }
+/// 完成的任务会在落库后被标记移除，不再长期存在于内存中。
+enum TranslationTaskStatus { queued, translating, failed, cancelled }
 
 /// 翻译任务描述
 class TranslationTask {
@@ -30,12 +31,11 @@ class TranslationTaskManager extends StateNotifier<Map<String, TranslationTask>>
 
   void addTask(TranslationTask task) => state = {...state, task.bookId: task};
 
+  /// 翻译完成即从内存任务中移除：结果已落库，持久化记录由
+  /// 翻译管理页从 DB 扫描展示，内存不需要保留「已完成」任务。
   void markCompleted(String bookId) {
-    final task = state[bookId];
-    if (task == null) return;
-    task.status = TranslationTaskStatus.completed;
-    task.progress = 1.0;
-    state = {...state, bookId: task};
+    if (!state.containsKey(bookId)) return;
+    state = {...state}..remove(bookId);
   }
 
   void markFailed(String bookId, String error) {

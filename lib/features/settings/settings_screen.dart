@@ -9,6 +9,7 @@ import '../../core/state/dictionary_providers.dart';
 import '../home/home_screen.dart';
 import 'translation_engine_screen.dart';
 import 'dictionary_screen.dart';
+import 'learning_settings_screen.dart';
 
 /// 导入时是否自动翻译
 final translateOnImportProvider = StateProvider<bool>((ref) {
@@ -126,26 +127,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await _db.setSetting('translate_on_import', value ? '1' : '0');
   }
 
-  Future<void> _saveBilingualEnabled(bool value) async {
-    await _db.setSetting('bilingual_enabled', value ? '1' : '0');
-  }
-
-  Future<void> _saveNativeLanguage(String value) async {
-    await _db.setSetting('native_language', value);
-  }
-
-  Future<void> _saveBilingualLearning(String value) async {
-    await _db.setSetting('bilingual_learning', value);
-  }
-
-  Future<void> _saveBilingualLayout(String value) async {
-    await _db.setSetting('bilingual_layout', value);
-  }
-
-  Future<void> _saveBilingualShowMode(String value) async {
-    await _db.setSetting('bilingual_show_mode', value);
-  }
-
   @override
   Widget build(BuildContext context) {
     final themeMode = ref.watch(themeModeProvider);
@@ -167,7 +148,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const Divider(),
 
-          // 学习（母语 + 双语阅读 合并框）
+          // 阅读（点击进入学习设置页）
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
             child: Container(
@@ -177,52 +158,54 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   color: Theme.of(context).colorScheme.outlineVariant,
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: Text(
-                      '学习',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: Theme.of(context).colorScheme.outline,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const LearningSettingsScreen(),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: Text(
+                        '阅读',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
                       ),
                     ),
-                  ),
-                  // 母语
-                  ListTile(
-                    leading: const Icon(Icons.flag_outlined),
-                    title: const Text('母语'),
-                    subtitle: Text(languageNames[ref.watch(nativeLanguageProvider)] ?? '中文'),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () => _showLanguagePicker(
-                      context,
-                      ref.watch(nativeLanguageProvider),
-                      (lang) {
-                        ref.read(nativeLanguageProvider.notifier).state = lang;
-                        _saveNativeLanguage(lang);
-                      },
-                    ),
-                  ),
-                  const Divider(height: 1, indent: 56),
-                  // 双语阅读
-                  ListTile(
-                    leading: const Icon(Icons.language),
-                    title: const Text('双语阅读'),
-                    subtitle: Text(
-                      ref.watch(bilingualEnabledProvider) ? '已开启' : '已关闭',
-                      style: TextStyle(
-                        color: ref.watch(bilingualEnabledProvider)
-                            ? Theme.of(context).colorScheme.primary
-                            : null,
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.flag_outlined),
+                      title: Text(
+                        languageNames[ref.watch(nativeLanguageProvider)] ?? '母语',
                       ),
+                      subtitle: const Text('母语'),
+                      trailing: const Icon(Icons.chevron_right),
                     ),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () => _showBilingualSettings(context, ref),
-                  ),
-                ],
+                    const Divider(height: 1, indent: 56),
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.headphones_outlined),
+                      title: Text(
+                        ref.watch(bilingualEnabledProvider) ? '已开启' : '已关闭',
+                        style: TextStyle(
+                          color: ref.watch(bilingualEnabledProvider)
+                              ? Theme.of(context).colorScheme.primary
+                              : null,
+                        ),
+                      ),
+                      subtitle: const Text('双语阅读/逐句精听'),
+                      trailing: const Icon(Icons.chevron_right),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -293,7 +276,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.info_outline),
             title: const Text('版本'),
-            subtitle: Text(_appVersion.isEmpty ? '1.0.6' : _appVersion),
+            subtitle: Text(_appVersion.isEmpty ? '1.1.0' : _appVersion),
           ),
         ],
       ),
@@ -332,200 +315,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ],
       ),
     );
-  }
-
-  void _showLanguagePicker(BuildContext context, String current, ValueChanged<String> onSelected) {
-    final entries = languageNames.entries.toList()
-      ..sort((a, b) => a.value.compareTo(b.value));
-    showDialog(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('选择语言'),
-        children: [
-          for (final entry in entries)
-            RadioListTile<String>(
-              title: Text(entry.value),
-              subtitle: Text(entry.key.toUpperCase()),
-              value: entry.key,
-              groupValue: current,
-              onChanged: (value) {
-                if (value != null) {
-                  onSelected(value);
-                  Navigator.pop(ctx);
-                }
-              },
-            ),
-        ],
-      ),
-    );
-  }
-
-  void _showBilingualSettings(BuildContext context, WidgetRef ref) {
-    final layoutOptions = {
-      'alternating': '交替显示',
-      'paragraph': '段落后显示',
-      'side_by_side': '左右分栏',
-    };
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheetState) => Padding(
-          padding: EdgeInsets.only(
-            left: 20,
-            right: 20,
-            top: 12,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
-          ),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text('双语阅读', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.pop(ctx),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // 启用开关
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('启用双语阅读'),
-                subtitle: const Text('阅读时显示原文与译文'),
-                value: ref.watch(bilingualEnabledProvider),
-                onChanged: (value) {
-                  ref.read(bilingualEnabledProvider.notifier).state = value;
-                  _saveBilingualEnabled(value);
-                  setSheetState(() {});
-                },
-              ),
-              // 译文展示方式
-              const SizedBox(height: 4),
-              const Text('译文展示', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 4),
-              RadioListTile<String>(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('立即展示'),
-                subtitle: const Text('译文直接跟随原文显示'),
-                value: 'immediate',
-                groupValue: ref.watch(bilingualShowModeProvider),
-                onChanged: (value) {
-                  if (value != null) {
-                    ref.read(bilingualShowModeProvider.notifier).state = value;
-                    _saveBilingualShowMode(value);
-                    setSheetState(() {});
-                  }
-                },
-              ),
-              RadioListTile<String>(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('点击展示'),
-                subtitle: const Text('点击原文区域后才显示译文'),
-                value: 'on_tap',
-                groupValue: ref.watch(bilingualShowModeProvider),
-                onChanged: (value) {
-                  if (value != null) {
-                    ref.read(bilingualShowModeProvider.notifier).state = value;
-                    _saveBilingualShowMode(value);
-                    setSheetState(() {});
-                  }
-                },
-              ),
-              const Divider(),
-              // 学习语言
-              const Text('学习语言', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Icon(Icons.menu_book, size: 20, color: Theme.of(context).colorScheme.primary),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(languageNames[ref.watch(bilingualLearningLanguageProvider)] ?? 'English'),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      _showLanguagePicker(
-                        context,
-                        ref.read(bilingualLearningLanguageProvider),
-                        (lang) {
-                          ref.read(bilingualLearningLanguageProvider.notifier).state = lang;
-                          _saveBilingualLearning(lang);
-                        },
-                      );
-                    },
-                    child: const Text('更改'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              // 阅读习惯
-              const Text('阅读习惯', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 4),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(Icons.info_outline, size: 16, color: Theme.of(context).colorScheme.primary),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '默认书籍原文语言为学习语言。如果书籍语言与母语一致，则会自动反转：将译文作为原文，书籍原文做译文展示。',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                          height: 1.4,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
-              ...layoutOptions.entries.map((entry) => RadioListTile<String>(
-                contentPadding: EdgeInsets.zero,
-                title: Text(entry.value),
-                subtitle: Text(_layoutSubtitle(entry.key)),
-                value: entry.key,
-                groupValue: ref.watch(bilingualLayoutProvider),
-                onChanged: (value) {
-                  if (value != null) {
-                    ref.read(bilingualLayoutProvider.notifier).state = value;
-                    _saveBilingualLayout(value);
-                    setSheetState(() {});
-                  }
-                },
-              )),
-            ],
-          ),
-        ),
-      ),
-      ),
-    );
-  }
-
-  String _layoutSubtitle(String layout) {
-    switch (layout) {
-      case 'alternating':
-        return '原文与译文交替出现';
-      case 'paragraph':
-        return '每段原文后紧跟译文';
-      case 'side_by_side':
-        return '原文在左，译文在右';
-      default:
-        return '';
-    }
   }
 
   String _engineSummary(WidgetRef ref) {

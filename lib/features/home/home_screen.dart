@@ -35,15 +35,23 @@ final weeklySecondsProvider = FutureProvider<List<int>>((ref) async {
   return db.getWeekReadingSeconds();
 });
 
-final unreadNotificationCountProvider = FutureProvider<int>((ref) async {
-  final db = LibraryDatabase();
-  return db.getUnreadNotificationCount();
+// 未读通知数：定时自动刷新，保证翻译完成等产生的通知即时反映到红点
+final unreadNotificationCountProvider = StreamProvider<int>((ref) async* {
+  yield await _fetchUnread();
+  await Future<void>.delayed(const Duration(seconds: 1));
+  yield await _fetchUnread();
+  await for (final _ in Stream.periodic(const Duration(seconds: 3))) {
+    yield await _fetchUnread();
+  }
 });
 
-final notificationsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
-  final db = LibraryDatabase();
-  return db.getNotifications();
-});
+Future<int> _fetchUnread() async {
+  try {
+    return await LibraryDatabase().getUnreadNotificationCount();
+  } catch (_) {
+    return 0;
+  }
+}
 
 int _todayWeekdayIndex() => DateTime.now().weekday - 1;
 
@@ -53,13 +61,12 @@ class HomeScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final recentAsync = ref.watch(recentBooksProvider);
-    final unreadAsync = ref.watch(unreadNotificationCountProvider);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('主页'),
         actions: [
-          _NotificationButton(unreadCountAsync: unreadAsync),
+          _NotificationButton(),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: '设置',
@@ -203,12 +210,15 @@ class HomeScreen extends ConsumerWidget {
 // ── 通知按钮（带红点） ──
 
 class _NotificationButton extends ConsumerWidget {
-  final AsyncValue<int> unreadCountAsync;
-  const _NotificationButton({required this.unreadCountAsync});
+  const _NotificationButton();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final unread = unreadCountAsync.when(data: (c) => c, loading: () => 0, error: (_, _) => 0);
+    final unread = ref.watch(unreadNotificationCountProvider).when(
+          data: (c) => c,
+          loading: () => 0,
+          error: (_, _) => 0,
+        );
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -234,55 +244,109 @@ class _NotificationButton extends ConsumerWidget {
 
 void _showNotifications(BuildContext context, WidgetRef ref) {
   final db = LibraryDatabase();
-  db.markAllNotificationsRead();
-  ref.invalidate(unreadNotificationCountProvider);
 
   showModalBottomSheet(
     context: context,
     isScrollControlled: true,
-    builder: (ctx) => DraggableScrollableSheet(
-      initialChildSize: 0.6,
-      maxChildSize: 0.9,
-      minChildSize: 0.3,
-      expand: false,
-      builder: (ctx, scrollController) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            const Expanded(child: Text('通知', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
-            IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx)),
-          ]),
-          const Divider(),
-          Expanded(
-            child: FutureBuilder<List<Map<String, dynamic>>>(
-              future: db.getNotifications(),
-              builder: (ctx, snap) {
-                if (!snap.hasData || snap.data!.isEmpty) {
-                  return const Center(child: Text('暂无通知', style: TextStyle(color: Colors.grey)));
-                }
-                return ListView.separated(
-                  controller: scrollController,
-                  itemCount: snap.data!.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
-                  itemBuilder: (ctx, i) {
-                    final n = snap.data![i];
-                    final title = n['title'] as String? ?? '';
-                    final body = n['body'] as String? ?? '';
-                    final createdAt = DateTime.fromMillisecondsSinceEpoch(n['created_at'] as int);
-                    return ListTile(
-                      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                      subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(body, style: const TextStyle(fontSize: 13), maxLines: 2, overflow: TextOverflow.ellipsis),
-                        const SizedBox(height: 2),
-                        Text('${createdAt.hour}:${createdAt.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.outline)),
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setSheetState) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.3,
+        expand: false,
+        builder: (ctx, scrollController) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Expanded(child: Text('通知', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+              IconButton(icon: const Icon(Icons.close), onPressed: () {
+                Navigator.pop(ctx);
+                ref.invalidate(unreadNotificationCountProvider);
+              }),
+            ]),
+            const Divider(),
+            Expanded(
+              child: FutureBuilder<List<Map<String, dynamic>>>(
+                future: db.getNotifications(),
+                builder: (ctx, snap) {
+                  if (!snap.hasData || snap.data!.isEmpty) {
+                    return const Center(child: Text('暂无通知', style: TextStyle(color: Colors.grey)));
+                  }
+                  final items = snap.data!;
+                  return Column(children: [
+                    if (items.any((n) => (n['read'] as int? ?? 0) == 0))
+                      Row(children: [
+                        const Spacer(),
+                        TextButton.icon(
+                          icon: const Icon(Icons.done_all, size: 18),
+                          label: const Text('全部已读'),
+                          onPressed: () async {
+                            await db.markAllNotificationsRead();
+                            ref.invalidate(unreadNotificationCountProvider);
+                            setSheetState(() {});
+                          },
+                        ),
                       ]),
-                    );
-                  },
-                );
-              },
+                    Expanded(
+                      child: ListView.separated(
+                        controller: scrollController,
+                        itemCount: items.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (ctx, i) {
+                          final n = items[i];
+                          final title = n['title'] as String? ?? '';
+                          final body = n['body'] as String? ?? '';
+                          final isRead = (n['read'] as int? ?? 0) == 1;
+                          final createdAt = DateTime.fromMillisecondsSinceEpoch(n['created_at'] as int);
+                          return ListTile(
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                            leading: isRead
+                                ? const SizedBox(width: 10)
+                                : Container(
+                                    width: 10, height: 10,
+                                    decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                                  ),
+                            title: Text(
+                              title,
+                              style: TextStyle(
+                                fontWeight: isRead ? FontWeight.w400 : FontWeight.w700,
+                                fontSize: 14,
+                              ),
+                            ),
+                            subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(
+                                body,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: isRead
+                                      ? Theme.of(context).colorScheme.outline
+                                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                                ),
+                                maxLines: 2, overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Text('${createdAt.hour}:${createdAt.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.outline)),
+                            ]),
+                            trailing: n['book_id'] != null
+                                ? const Icon(Icons.chevron_right, size: 18)
+                                : null,
+                            onTap: () async {
+                              if (!isRead) {
+                                await db.markNotificationRead(n['id'] as int);
+                                ref.invalidate(unreadNotificationCountProvider);
+                                setSheetState(() {});
+                              }
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ]);
+                },
+              ),
             ),
-          ),
-        ]),
+          ]),
+        ),
       ),
     ),
   );

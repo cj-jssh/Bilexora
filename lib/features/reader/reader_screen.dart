@@ -10,6 +10,7 @@ import '../../core/storage/book_package_manager.dart';
 import '../../core/storage/content_dat_reader.dart';
 import '../../core/database/library_database.dart';
 import '../../core/utils/utils.dart';
+import '../../core/utils/top_banner.dart';
 import '../library/library_screen.dart';
 import '../home/home_screen.dart';
 import '../settings/settings_screen.dart';
@@ -1824,8 +1825,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         );
         if (mounted) {
           setState(() => _translationMap.addAll(results));
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('翻译完成: ${results.length} 句'), behavior: SnackBarBehavior.floating));
+          showTopBanner('翻译完成: ${results.length} 句', icon: Icons.check_circle);
           final db = LibraryDatabase();
           await db.addNotification(type: 'translation', title: '翻译完成', body: '「${_bookMeta?.title ?? ''}」已翻译 ${results.length} 句', bookId: widget.bookId);
         }
@@ -1841,8 +1841,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               _translationMap[r.globalIndex] = r.text;
             }
           });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('翻译完成: ${translated.length} 句'), behavior: SnackBarBehavior.floating));
+          showTopBanner('翻译完成: ${translated.length} 句', icon: Icons.check_circle);
           final db = LibraryDatabase();
           await db.addNotification(type: 'translation', title: '翻译完成', body: '「${_bookMeta?.title ?? ''}」已翻译 ${translated.length} 句', bookId: widget.bookId);
         }

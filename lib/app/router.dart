@@ -12,6 +12,7 @@ import '../features/settings/settings_screen.dart';
 import '../features/library/translation_management_screen.dart';
 import '../features/library/translation_detail_screen.dart';
 import '../core/database/library_database.dart';
+import '../core/utils/top_banner.dart';
 
 /// 检查是否首次启动
 Future<bool> _isFirstLaunch() async {
@@ -27,6 +28,7 @@ Future<bool> _isFirstLaunch() async {
 /// 路由 Provider
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
+    navigatorKey: appNavigatorKey,
     initialLocation: '/home',
     redirect: (context, state) async {
       // 只在首次加载时做一次引导页跳转

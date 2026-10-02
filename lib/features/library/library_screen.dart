@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import '../../core/utils/utils.dart';
+import '../../core/utils/top_banner.dart';
 import '../../core/database/library_database.dart';
 import '../../core/storage/book_package_manager.dart';
 import '../../core/storage/book_importer.dart';
@@ -479,8 +480,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         if (!LocalTranslationService.isBookCancelled(book.id)) {
           ref.read(translationTaskManagerProvider.notifier).markCompleted(book.id);
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('翻译完成: ${results.length} 句'), behavior: SnackBarBehavior.floating));
+            showTopBanner('翻译完成: ${results.length} 句', icon: Icons.check_circle);
             final db = LibraryDatabase();
             await db.saveTranslationStatus(bookId: book.id, bookTitle: book.title, language: tgtLang, sentenceCount: results.length, engineId: active.id);
             await db.addNotification(type: 'translation', title: '翻译完成', body: '「${book.title}」已翻译 ${results.length} 句', bookId: book.id);
@@ -518,8 +518,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           await fm.appendTranslation(lang: learningLang, engineId: active.id, priority: priority, results: translated);
         }
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('翻译完成: ${translated.length} 句'), behavior: SnackBarBehavior.floating));
+          showTopBanner('翻译完成: ${translated.length} 句', icon: Icons.check_circle);
           final db = LibraryDatabase();
           await db.saveTranslationStatus(bookId: book.id, bookTitle: book.title, language: learningLang, sentenceCount: translated.length, engineId: active.id);
           await db.addNotification(type: 'translation', title: '翻译完成', body: '「${book.title}」已翻译 ${translated.length} 句', bookId: book.id);

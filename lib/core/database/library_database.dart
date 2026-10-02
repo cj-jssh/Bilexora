@@ -337,6 +337,27 @@ class LibraryDatabase {
         conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  /// 清空词典缓存表（可重建的查词缓存）
+  Future<void> clearDictionaryCache() async {
+    final db = await database;
+    await db.delete('dictionary_cache');
+  }
+
+  /// 估算词典缓存占用的字节（近似：按记录数 × 平均大小）
+  Future<int> getDictionaryCacheEstimate() async {
+    final db = await database;
+    try {
+      final result =
+          await db.rawQuery('SELECT COUNT(*) AS c, SUM(LENGTH(translation)) AS s FROM dictionary_cache');
+      final count = (result.first['c'] as num?)?.toInt() ?? 0;
+      final sum = (result.first['s'] as num?)?.toInt() ?? 0;
+      // 中文汉字 UTF-8 3 字节，英文 1 字节；按 2 字节/字符估算文本长度
+      return count * 64 + sum * 2;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   // ========================
   // Reading Time
   // ========================

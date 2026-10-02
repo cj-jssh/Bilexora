@@ -4,6 +4,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../app/router.dart';
 import '../../core/database/library_database.dart';
 import '../../core/services/dictionary_manager.dart';
+import '../../core/storage/storage_service.dart';
 import '../../core/state/dictionary_providers.dart';
 import '../home/home_screen.dart';
 import 'translation_engine_screen.dart';
@@ -53,14 +54,36 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final LibraryDatabase _db = LibraryDatabase();
+  final StorageService _storage = StorageService();
   // 运行时读取的构建版本号 (与 pubspec.yaml 的 version 保持一致)
   String _appVersion = '';
+  // 存储用量（字节）与加载状态
+  int _storageBytes = 0;
+  bool _storageLoading = true;
+  bool _clearingCache = false;
 
   @override
   void initState() {
     super.initState();
     _loadAppVersion();
     _loadAllSettings();
+    _loadStorageUsage();
+  }
+
+  /// 异步计算存储用量
+  Future<void> _loadStorageUsage() async {
+    setState(() => _storageLoading = true);
+    try {
+      final (total, _) = await _storage.appUsageBytes();
+      if (mounted) {
+        setState(() {
+          _storageBytes = total;
+          _storageLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _storageLoading = false);
+    }
   }
 
   Future<void> _loadAppVersion() async {
@@ -226,13 +249,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.storage),
             title: const Text('存储用量'),
-            subtitle: const Text('计算中...'),
-            onTap: () {},
+            subtitle: Text(
+              _storageLoading ? '计算中...' : formatBytes(_storageBytes),
+            ),
+            onTap: _storageLoading ? null : _loadStorageUsage,
           ),
           ListTile(
             leading: const Icon(Icons.delete_outline),
             title: const Text('清除缓存'),
-            onTap: () {},
+            subtitle: _clearingCache ? const Text('正在清除...') : const Text('清理词典缓存与临时文件'),
+            onTap: _clearingCache ? null : _confirmClearCache,
           ),
           const Divider(),
 
@@ -241,7 +267,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.info_outline),
             title: const Text('版本'),
-            subtitle: Text(_appVersion.isEmpty ? '1.0.5' : _appVersion),
+            subtitle: Text(_appVersion.isEmpty ? '1.0.6' : _appVersion),
           ),
         ],
       ),
@@ -496,6 +522,50 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     Navigator.push(context, MaterialPageRoute(
       builder: (_) => const TranslationEngineScreen(),
     ));
+  }
+
+  /// 清除缓存确认并执行
+  Future<void> _confirmClearCache() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清除缓存'),
+        content: const Text('将清理词典缓存与临时文件（不影响书籍、阅读进度和生词本）。是否继续？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            child: const Text('清除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _clearingCache = true);
+    try {
+      final released = await _storage.clearCache();
+      await _loadStorageUsage();
+      if (mounted) {
+        setState(() => _clearingCache = false);
+        final msg = released > 0
+            ? '已清除缓存（释放 ${formatBytes(released)}）'
+            : '已清除缓存';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _clearingCache = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('清除失败，请稍后重试'), behavior: SnackBarBehavior.floating),
+        );
+      }
+    }
   }
 
   void _showDailyGoalPicker(BuildContext context, WidgetRef ref) {

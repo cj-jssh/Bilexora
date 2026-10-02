@@ -82,6 +82,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   final Set<int> _revealedSentences = {};
   final Set<int> _noTranslationSentences = {};
 
+  // ── 分区渲染: 扁平句子条目 + 高度缓存 ──────────────────────
+  // 每个逻辑行(item)的已测高度缓存, 惰性填充, 供提前预计算与滚动定位。
+  // 条目类型: separator / sentence(原文) / translation(译文)
+  final List<double> _itemHeightCache = [];
+  // 译文行译 GlobalKey (用于展开/折叠时锚点滚动补偿)
+  final Map<int, GlobalKey> _translationKeys = {};
+
+
   // 阅读计时
   DateTime? _sessionStart;
   Timer? _readingTimer;
@@ -560,9 +568,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   /// 点击译文区域：切换译文的显示/隐藏（每句独立）
   void _tapTranslationArea(int sentenceGlobalIndex) {
+    // 高度发生变化前, 记录锚点项(该译文行)相对视口顶部的全局Y,
+    // setState 后用 Anchor 补偿滚动, 避免展开/收起时阅读位置跳动。
+    double? anchorOffsetFromViewportTop;
+    final key = _translationKeys[sentenceGlobalIndex];
+    final anchorBox =
+        key?.currentContext?.findRenderObject() as RenderBox?;
+    if (anchorBox != null && anchorBox.hasSize) {
+      anchorOffsetFromViewportTop =
+          anchorBox.localToGlobal(Offset.zero).dy;
+    }
+
     if (_revealedSentences.contains(sentenceGlobalIndex)) {
       // 已显示 → 隐藏
       setState(() => _revealedSentences.remove(sentenceGlobalIndex));
+      _applyAnchorCorrection(sentenceGlobalIndex, anchorOffsetFromViewportTop);
       return;
     }
     // 检查是否有翻译数据
@@ -577,7 +597,30 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       }
     } else {
       setState(() => _revealedSentences.add(sentenceGlobalIndex));
+      _applyAnchorCorrection(sentenceGlobalIndex, anchorOffsetFromViewportTop);
     }
+  }
+
+  /// 展开/折叠高度变化后, 把锚点行补偿回原屏幕Y位置, 防止阅读跳动。
+  void _applyAnchorCorrection(int charOffset, double? anchorYBefore) {
+    if (anchorYBefore == null || !mounted || !_scrollController.hasClients) {
+      return;
+    }
+    // 隐藏时锚点行已被移除(不再有key), 改用打开前位置的 row;
+    // 为稳妥, 统一用 post-frame 里对同一 charOffset 的 translation key 校正,
+    // 若该行已隐藏(折叠), 则跳过(隐藏后下方上移, 行为自然)。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final box = (_translationKeys[charOffset]
+              ?.currentContext?.findRenderObject()) as RenderBox?;
+      if (box == null || !box.hasSize) return;
+      final nowY = box.localToGlobal(Offset.zero).dy;
+      final delta = anchorYBefore - nowY;
+      if (delta.abs() < 0.5) return;
+      final pos = _scrollController.position;
+      _scrollController.jumpTo(
+          (pos.pixels - delta).clamp(0.0, pos.maxScrollExtent));
+    });
   }
 
   /// 弹出翻译引擎选择对话框（默认选中第一个）
@@ -901,194 +944,108 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         height: _lineHeight * 0.9, letterSpacing: _letterSpacing,
         fontFamily: 'serif', fontStyle: FontStyle.italic);
 
-    final children = <Widget>[];
-
-    // 重置计数器，清理多余 key
+    // 重置行 key 计数器, 让 _lineKeys 每 rebuild 循环复用并可清理
     _lineKeyCounter = 0;
     if (!bilingualEnabled) _lineKeys.clear();
 
-    /// 空白行：仅占位（点击由内容区整体的指针监听统一处理，呼出菜单）
-    Widget spacerTap({double h = 4}) {
-      return SizedBox(width: double.infinity, height: h);
-    }
-
-    /// 构建带高亮的文本行
-    Widget _buildHighlightedText(String text, TextStyle style, int start,
-        int end) {
-      final spans = <TextSpan>[];
-      if (start > 0) {
-        spans.add(TextSpan(text: text.substring(0, start), style: style));
-      }
-      spans.add(TextSpan(
-        text: text.substring(start, end),
-        style: style.copyWith(
-          backgroundColor: _textColor.withValues(alpha: 0.25),
-        ),
-      ));
-      if (end < text.length) {
-        spans.add(
-            TextSpan(text: text.substring(end), style: style));
-      }
-      return SelectableText.rich(
-        TextSpan(children: spans, style: style),
-        maxLines: null,
-      );
-    }
-
-    /// 文本行：宽度受限，自动换行。
-    /// 在有高亮词时用 RichText 标记背景色。
-    /// 双语模式下额外包裹 GestureDetector 实现逐词点击查词。
-    /// [allowLookup] 为 false 时不包 SelectableText/查词 Listener：
-    /// 译文行只需展示、无需点词查词, 用轻量 Text 大幅降低widget数量,
-    /// 是双语模式下翻页卡顿的关键优化之一。
-    Widget textLine(String text, TextStyle style, {bool allowLookup = true}) {
-
-      Widget textWidget;
-      if (!allowLookup) {
-        // 译文行: 轻量 Text, 不参与查词/选择
-        textWidget = Text(text, style: style, maxLines: null);
-      } else if (_highlightedWord != null &&
-          _highlightedText == text &&
-          _highlightWordStart != null) {
-        textWidget = _buildHighlightedText(text, style,
-            _highlightWordStart!, _highlightWordEnd!);
-      } else {
-        textWidget = LayoutBuilder(
-          builder: (context, constraints) {
-            return ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: constraints.maxWidth),
-              child: SelectableText(text, style: style, maxLines: null),
-            );
-          },
-        );
-      }
-
-      // 双语模式下给每行包裹 Listener + 持久化 GlobalKey，
-      // TextPainter.getPositionForOffset 精确处理换行文本。
-      // Listener.onPointerUp 从内向外冒泡，优先于外层 Listener。
-      // 译文行(allowLookup=false)不需要查词, 跳过这层重量级包装。
-      if (allowLookup && bilingualEnabled && text.trim().isNotEmpty) {
-        final keyId = _lineKeyCounter++;
-        final lineKey = _lineKeys.putIfAbsent(keyId, () => GlobalKey());
-        return RepaintBoundary(
-          child: Listener(
-          onPointerUp: (event) {
-            final elapsed = DateTime.now().difference(_ptrDownTime).inMilliseconds;
-            if (!_ptrDown || elapsed >= 300 || (event.position - _ptrDownPos).distance >= 12) return;
-            if (!ref.read(bilingualEnabledProvider)) return;
-            final renderBox =
-                lineKey.currentContext?.findRenderObject() as RenderBox?;
-            if (renderBox == null) return;
-            final localPos = renderBox.globalToLocal(event.position);
-            final tp = TextPainter(
-              text: TextSpan(text: text, style: style),
-              textDirection: TextDirection.ltr,
-            )..layout(maxWidth: renderBox.size.width);
-            if (localPos.dx < 0 ||
-                localPos.dx > tp.width ||
-                localPos.dy < 0 ||
-                localPos.dy > tp.height) return;
-            final charOffset = tp.getPositionForOffset(localPos).offset;
-            if (charOffset < 0 || charOffset >= text.length) return;
-            final result_ = _extractWordAtOffset(text, charOffset);
-            if (result_ == null || result_.word.length < 2) return;
-            _wordTappedFromGesture = true;
-            setState(() {
-              _highlightedWord = result_.word;
-              _highlightedText = text;
-              _highlightWordStart = result_.start;
-              _highlightWordEnd = result_.end;
-            });
-            _showWordLookup(result_.word);
-          },
-          child: KeyedSubtree(key: lineKey, child: textWidget),
-        ),
-      ); // 闭合 RepaintBoundary
-      }
-
-      return RepaintBoundary(child: textWidget);
-    }
-
+    // ── 扁平句子条目列表（供 SliverList 分区懒渲染） ──────────
+    // 每种条目:
+    //   sep        段落间隔占位
+    //   original   原文句子(text + charOffset)或非双语整段
+    //   translation 译文行(text + charOffset, 可选展示)
+    final items = <_ReaderItem>[];
 
     for (int bi = 0; bi < _allBlocks.length; bi++) {
       final block = _allBlocks[bi];
 
-      if (bi > 0 && children.isNotEmpty && block.blockType == 'paragraph') {
-        children.add(spacerTap(h: 12));
+      if (bi > 0 && items.isNotEmpty && block.blockType == 'paragraph') {
+        items.add(const _ReaderItem.separator());
       }
 
       block.when(
         paragraph: (paragraph) {
           if (paragraph.sentences.isEmpty) return;
-
           if (!bilingualEnabled) {
-            children.add(textLine(
-              paragraph.sentences.map((s) => s.text).join(''),
-              origStyle,
-            ));
-          } else {
-            for (int i = 0; i < paragraph.sentences.length; i++) {
-              final s = paragraph.sentences[i];
-              final t = _translationMap[s.charOffset] ?? '';
-              final hasT = t.isNotEmpty;
-              final isRev = _revealedSentences.contains(s.charOffset);
-              final showNow = hasT && (showMode == 'on_tap' ? isRev : !isRev);
-              final displayOrig = shouldSwap && hasT ? t : s.text;
-              final displayTrans = shouldSwap ? s.text : t;
+            // 非双语: 整段合并成一条原文(可查词)
+            final text = paragraph.sentences.map((s) => s.text).join('');
+            items.add(_ReaderItem.original(
+                text: text, charOffset: paragraph.sentences.first.charOffset));
+            return;
+          }
+          for (int i = 0; i < paragraph.sentences.length; i++) {
+            final s = paragraph.sentences[i];
+            final t = _translationMap[s.charOffset] ?? '';
+            final hasT = t.isNotEmpty;
+            final isRev = _revealedSentences.contains(s.charOffset);
+            final showNow = hasT && (showMode == 'on_tap' ? isRev : !isRev);
+            final displayOrig = shouldSwap && hasT ? t : s.text;
+            final displayTrans = shouldSwap ? s.text : t;
 
-              if (i > 0) children.add(spacerTap());
-              children.add(textLine(displayOrig, origStyle));
-              children.add(spacerTap());
+            if (i > 0) items.add(const _ReaderItem.separator());
+            items.add(_ReaderItem.original(
+                text: displayOrig, charOffset: s.charOffset));
 
-              if (hasT && showNow) {
-                // 译文行: 仅展示, 不参与查词, 用轻量 Text
-                children.add(textLine(displayTrans, transStyle, allowLookup: false));
-              } else {
-                children.add(_buildTransPlaceholder(
-                  index: s.charOffset,
-                  hasT: hasT,
-                  noTrans: hasT ? false : _noTranslationSentences.contains(s.charOffset),
-                ));
-              }
+            if (hasT && showNow) {
+              items.add(_ReaderItem.translation(
+                  text: displayTrans, charOffset: s.charOffset));
+            } else {
+              items.add(_ReaderItem.placeholder(
+                  charOffset: s.charOffset,
+                  noTrans: hasT
+                      ? false
+                      : _noTranslationSentences.contains(s.charOffset)));
             }
           }
         },
         image: (imagePath, altText) {
           final file = File(p.join(ref.read(libraryPathProvider), 'books',
               widget.bookId, 'images', p.basename(imagePath)));
-          children.add(
-            file.existsSync()
-                ? ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: Image.file(file, fit: BoxFit.contain,
-                      errorBuilder: (_, _, _) => _imagePlaceholder(altText)),
-                  )
-                : _imagePlaceholder(altText),
-          );
+          items.add(_ReaderItem.image(file: file, altText: altText));
         },
       );
     }
 
-    children.add(spacerTap(h: 80));
+    // 底部留白
+    items.add(const _ReaderItem.separator());
 
-    // 清理不再使用的行 key, 防止滚动加载多章后 _lineKeys 无界增长
-    // (键按本次 build 实际使用数量区间 [0, _lineKeyCounter) 收敛)
+    // 译文高度缓存同步到条目数(用于提前预计算展开高, 避免测量抖动)
+    if (_itemHeightCache.length < items.length) {
+      final grow = List<double>.filled(items.length - _itemHeightCache.length, 0);
+      _itemHeightCache.addAll(grow);
+    }
+
+    // ── 点击命中: 用 TextPainter 精确算出点击点所在的词 ──────
+    Widget row(BuildContext ctx, int i, _ReaderItem it) => it.when(
+      separator: () => SizedBox(width: double.infinity,
+          height: i > 0 ? 4 : 12),
+      original: (text, charOffset) => _buildOriginalRow(
+          text, charOffset, origStyle, bilingualEnabled),
+      translation: (text, charOffset) => _buildTranslationRow(
+          text, charOffset, transStyle, shouldSwap),
+      placeholder: (charOffset, noTrans) =>
+          _buildTransPlaceholder(index: charOffset, hasT: false, noTrans: noTrans),
+      image: (file, altText) => (file != null && file.existsSync())
+          ? ClipRRect(borderRadius: BorderRadius.circular(4),
+            child: Image.file(file, fit: BoxFit.contain,
+              errorBuilder: (_, _, _) => _imagePlaceholder(altText)))
+          : _imagePlaceholder(altText),
+    );
+
+    // 清理不再使用的行 key, 防止滚动加载多章后无界增长
     if (_lineKeys.length > _lineKeyCounter * 2 + 64) {
       _lineKeys.removeWhere((k, _) => k >= _lineKeyCounter);
     }
+    if (_translationKeys.length > 4096) {
+      _translationKeys.removeWhere(
+          (k, v) => v.currentContext?.findRenderObject() == null);
+    }
 
-    // 用 Listener 整体监听指针：不加入手势竞技场，
-    // 因此不会阻断滚动，也不会吞掉 SelectableText 的长按选词。
-    //
-    // 同时嵌套 NotificationListener 捕获不足一屏时的滚动手势。
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: _onPtrDown,
-      onPointerUp: _onPtrUp,
-      onPointerCancel: _onPtrCancel,
+    // ── 不足一屏滚动手势 + 章节边界加载 + 分区懒渲染 ──────────
+    // SelectionArea 提供跨句子的长按复制(默认上下文菜单含“复制”),
+    // 替代句子级 SelectableText, 大大减少 EditableText 数量。
+    return SelectionArea(
       child: NotificationListener<ScrollNotification>(
         onNotification: (notification) {
-          // 捕获用户试图滚动但内容不足一屏的情况（maxScroll < 1px）
           if (notification is UserScrollNotification &&
               _scrollController.hasClients &&
               _scrollController.position.maxScrollExtent < 1.0) {
@@ -1108,21 +1065,65 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               }
             }
           }
-          return false; // 不拦截，让事件继续传递
+          return false;
         },
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          controller: _scrollController,
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ...children,
-
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: _onPtrDown,
+          onPointerUp: _onPtrUp,
+          onPointerCancel: _onPtrCancel,
+          child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            controller: _scrollController,
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                sliver: SliverList.builder(
+                  // 分区懒渲染: 只 build 可视及邻近范围(默认 cacheExtent),
+                  // 长文/多章不会一次性构建全部句子, 大幅降低布局开销。
+                  itemCount: items.length,
+                  itemBuilder: (ctx, i) {
+                    final it = items[i];
+                    return _recordHeight(
+                      i,
+                      row(ctx, i, it),
+                    );
+                  },
+                ),
+              ),
+              // 底部留白
+              SliverToBoxAdapter(
+                  child: SizedBox(height: 80)),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  // ── 高度缓存记录: 每行 build 后把实际高度写入 _itemHeightCache ──
+  Widget _recordHeight(int i, Widget child) {
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        // constraints.maxHeight 在 SliverList 中代表可用区间; 不作为最终高度。
+        // 用 Builder + post-frame 读取 child 真实渲染高度写入缓存, 供后续预计算与锚点。
+        return Builder(
+          builder: (ctx) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              final rc = ctx.findRenderObject();
+              if (rc is RenderBox && rc.hasSize) {
+                final h = rc.size.height;
+                if (i < _itemHeightCache.length &&
+                    _itemHeightCache[i] != h) {
+                  _itemHeightCache[i] = h;
+                }
+              }
+            });
+            return child;
+          },
+        );
+      },
     );
   }
 
@@ -1417,6 +1418,95 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         const Icon(Icons.image, size: 48, color: Colors.grey),
         if (altText != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(altText, style: const TextStyle(color: Colors.grey))),
       ])),
+    );
+  }
+
+  /// 原文行: 轻量 Text + TextPainter 命中检测查词 (不依赖 SelectableText)。
+  /// 仅双语模式下需要点词查词; 非双语整段用普通 Text, 由外层 SelectionArea
+  /// 提供复制。
+  Widget _buildOriginalRow(
+      String text, int charOffset, TextStyle style, bool lookupEnabled) {
+    // 高亮渲染
+    Widget base;
+    if (_highlightedWord != null &&
+        _highlightedText == text &&
+        _highlightWordStart != null) {
+      final spans = <TextSpan>[];
+      if (_highlightWordStart! > 0) {
+        spans.add(TextSpan(
+            text: text.substring(0, _highlightWordStart!), style: style));
+      }
+      spans.add(TextSpan(
+        text: text.substring(_highlightWordStart!, _highlightWordEnd!),
+        style: style.copyWith(
+            backgroundColor: _textColor.withValues(alpha: 0.25)),
+      ));
+      if (_highlightWordEnd! < text.length) {
+        spans.add(TextSpan(
+            text: text.substring(_highlightWordEnd!), style: style));
+      }
+      base = Text.rich(TextSpan(children: spans, style: style),
+          maxLines: null);
+    } else {
+      base = Text(text, style: style, maxLines: null);
+    }
+
+    // 查词: 仅双语模式下对原文行启用 Listener + TextPainter 命中
+    if (lookupEnabled && text.trim().isNotEmpty) {
+      final keyId = _lineKeyCounter++;
+      final lineKey = _lineKeys.putIfAbsent(keyId, () => GlobalKey());
+      return RepaintBoundary(
+        child: Listener(
+          onPointerUp: (event) {
+            final elapsed =
+                DateTime.now().difference(_ptrDownTime).inMilliseconds;
+            if (!_ptrDown || elapsed >= 300 ||
+                (event.position - _ptrDownPos).distance >= 12) {
+              return;
+            }
+            if (!ref.read(bilingualEnabledProvider)) return;
+            final renderBox =
+                lineKey.currentContext?.findRenderObject() as RenderBox?;
+            if (renderBox == null) return;
+            final localPos = renderBox.globalToLocal(event.position);
+            final tp = TextPainter(
+              text: TextSpan(text: text, style: style),
+              textDirection: TextDirection.ltr,
+            )..layout(maxWidth: renderBox.size.width);
+            if (localPos.dx < 0 || localPos.dx > tp.width ||
+                localPos.dy < 0 || localPos.dy > tp.height) {
+              return;
+            }
+            final charOffset_ = tp.getPositionForOffset(localPos).offset;
+            if (charOffset_ < 0 || charOffset_ >= text.length) return;
+            final result_ = _extractWordAtOffset(text, charOffset_);
+            if (result_ == null || result_.word.length < 2) return;
+            _wordTappedFromGesture = true;
+            setState(() {
+              _highlightedWord = result_.word;
+              _highlightedText = text;
+              _highlightWordStart = result_.start;
+              _highlightWordEnd = result_.end;
+            });
+            _showWordLookup(result_.word);
+          },
+          child: KeyedSubtree(key: lineKey, child: base),
+        ),
+      );
+    }
+    return RepaintBoundary(child: base);
+  }
+
+  /// 译文行: 轻量 Text, 仅展示, 不参与查词。
+  /// 用 _translationKeys[charOffset] 提供锚点, 供展开/折叠滚动补偿。
+  Widget _buildTranslationRow(
+      String text, int charOffset, TextStyle style, bool _) {
+    final key = _translationKeys.putIfAbsent(charOffset, () => GlobalKey());
+    return RepaintBoundary(
+      child: KeyedSubtree(
+        key: key,
+        child: Text(text, style: style, maxLines: null),
+      ),
     );
   }
 
@@ -1808,3 +1898,60 @@ class _ThemeBtn extends StatelessWidget {
     );
   }
 }
+/// 阅读器扁平条目模型: 支持 SliverList 分区懒渲染。
+class _ReaderItem {
+  final String type; // separator / original / translation / placeholder / image
+  final String text;
+  final int charOffset;
+  final bool noTrans;
+  final File? file;
+  final String? altText;
+
+  const _ReaderItem._({
+    required this.type,
+    this.text = '',
+    this.charOffset = -1,
+    this.noTrans = false,
+    this.altText,
+    this.file,
+  });
+
+  // 每种工厂显式传默认值, 保证可选参数默认值都是编译期常量
+  const _ReaderItem.separator() : this._(type: 'separator');
+  factory _ReaderItem.original(
+          {required String text, required int charOffset}) =>
+      _ReaderItem._(type: 'original', text: text, charOffset: charOffset);
+  factory _ReaderItem.translation(
+          {required String text, required int charOffset}) =>
+      _ReaderItem._(type: 'translation', text: text, charOffset: charOffset);
+  factory _ReaderItem.placeholder(
+          {required int charOffset, required bool noTrans}) =>
+      _ReaderItem._(type: 'placeholder',
+          charOffset: charOffset, noTrans: noTrans);
+  factory _ReaderItem.image({required File file, String? altText}) =>
+      _ReaderItem._(type: 'image', file: file, altText: altText);
+
+  R when<R>({
+    required R Function() separator,
+    required R Function(String text, int charOffset) original,
+    required R Function(String text, int charOffset) translation,
+    required R Function(int charOffset, bool noTrans) placeholder,
+    required R Function(File? file, String? altText) image,
+  }) {
+    switch (type) {
+      case 'separator':
+        return separator();
+      case 'original':
+        return original(text, charOffset);
+      case 'translation':
+        return translation(text, charOffset);
+      case 'placeholder':
+        return placeholder(charOffset, noTrans);
+      case 'image':
+        return image(file, altText);
+      default:
+        return separator();
+    }
+  }
+}
+

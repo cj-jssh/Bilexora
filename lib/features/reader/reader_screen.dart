@@ -946,6 +946,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
     // 重置行 key 计数器, 让 _lineKeys 每 rebuild 循环复用并可清理
     _lineKeyCounter = 0;
+    // 占位框 key 只在本帧有效，build 阶段收集、pointer 阶段短暂使用，逐帧重建
+    _placeholderKeys.clear();
     if (!bilingualEnabled) _lineKeys.clear();
 
     // ── 扁平句子条目列表（供 SliverList 分区懒渲染） ──────────
@@ -1137,6 +1139,11 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   // 每行文本的持久化 GlobalKey（跨 rebuild 保持引用）
   final Map<int, GlobalKey> _lineKeys = {};
   int _lineKeyCounter = 0;
+
+  // 译文占位框的 GlobalKey，供 _hitOnChildGestureHandler 精确命中检测。
+  // 占位框是唯一有独立手势（onTap 展开译文）的子组件，且每屏数量有限，
+  // 用其包围盒做命中判断比旧的 RenderPointerListener 计数更可靠。
+  final List<GlobalKey> _placeholderKeys = [];
 
   // ── 指针点击检测（呼出菜单+查词） ──
   bool _ptrDown = false;
@@ -1330,7 +1337,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     // 持久化查词统计（每日 + 累计），异步不阻塞 UI
     final db = LibraryDatabase();
     db.incrementLookupCount().then((_) {
-      if (mounted) ref.invalidate(lookupWordCountProvider);
+      // 首页同时展示今日与累计，两个 provider 都要失效以触发刷新
+      if (mounted) {
+        ref.invalidate(todayLookupCountProvider);
+        ref.invalidate(totalLookupCountProvider);
+        ref.invalidate(lookupWordCountProvider);
+      }
     }).catchError((Object e) {
       debugPrint('[查词] 统计失败: $e');
     });
@@ -1354,36 +1366,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     });
   }
 
-  /// 判断全局坐标 [globalPos] 是否落在有独立手势的子组件上（如译文占位框的
-  /// GestureDetector），此时不呼出菜单，由子组件自己处理点击。
+  /// 判断全局坐标 [globalPos] 是否落在译文占位框上。
   ///
-  /// 只有路径中同时有多个 RenderPointerListener 并且其中至少有一个是
-  /// 子组件的 RenderPointerListener（即不是 Listener 自身）且没有
-  /// RenderEditable 文本组件时，才判定为有独立手势的子组件。
-  /// 纯图片页面（无文本）时路径中只有 Listener+ScrollView 的 Listener，
-  /// 需要让点击通过呼出菜单。
+  /// 旧实现靠“≥3 个 RenderPointerListener 且无 RenderEditable”启发式判别，但那
+  /// 是在每行都是 SelectableText（命中路径含 RenderEditable）的前提下设计的。重构为
+  /// 轻量 Text + 逐词 Listener 后，原文行也是 3 个 RenderPointerListener 且无
+  /// RenderEditable，导致“句尾/行间空白”被误判为命中子组件手势而不再呼出菜单。
+  /// 现在改为精确命中检测：遍历当前已构建的译文占位框 RenderBox，只有点击点确实落在
+  /// 某个占位框内部时才算“子组件已自我处理”，其余空白（含原文行句尾、行间距）统一
+  /// 交回外层 _onPtrUp 呼出菜单。
   bool _hitOnChildGestureHandler(Offset globalPos) {
-    final box = context.findRenderObject() as RenderBox?;
-    if (box == null) return false;
-    final result = BoxHitTestResult();
-    final local = box.globalToLocal(globalPos);
-    if (!(box.hitTest(result, position: local))) return false;
-    bool hasRenderEditable = false;
-    int pointerListenerCount = 0;
-    for (final entry in result.path) {
-      if (entry.target is RenderPointerListener) {
-        pointerListenerCount++;
-      }
-      if (entry.target is RenderEditable) {
-        hasRenderEditable = true;
+    for (final key in _placeholderKeys) {
+      final rb = key.currentContext?.findRenderObject() as RenderBox?;
+      if (rb == null || !rb.hasSize || !rb.attached) continue;
+      final local = rb.globalToLocal(globalPos);
+      if (local.dx >= 0 && local.dy >= 0 &&
+          local.dx <= rb.size.width && local.dy <= rb.size.height) {
+        return true;
       }
     }
-    // 有 >=3 个 RenderPointerListener 且路径中无 RenderEditable
-    // 说明点击落在有自定义手势子组件（译文占位框：自身 GestureDetector +
-    // BackdropFilter）上，且该区域无文本。
-    // 只有 2 个时是 Listener 自身 + ScrollView，属于纯空白/图片区域，
-    // 应该呼出菜单而不是拦截。
-    return pointerListenerCount >= 3 && !hasRenderEditable;
+    // 未命中任何占位框 → 空白/图片/原文行句尾，交给外层呼出菜单
+    return false;
   }
 
   /// 毛玻璃占位框，高度 ≈ 一行译文，点击展开译文
@@ -1393,9 +1396,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     // 注意: 这里刻意不用 BackdropFilter(毛玻璃)——每个未翻译句子都会实例化一个
     // BackdropFilter + 高斯模糊, 触发 GPU saveLayer 并随滚动反复逐句重绘,
     // 是双语模式翻页卡顿的主要来源。改用纯色背景占位, 不触发 saveLayer。
+    final key = GlobalKey();
+    _placeholderKeys.add(key);
     return SizedBox(
       width: double.infinity,
       child: GestureDetector(
+        key: key,
         onTap: () => _tapTranslationArea(index),
         child: Container(
           height: placeholderHeight,

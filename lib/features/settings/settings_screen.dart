@@ -241,7 +241,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.info_outline),
             title: const Text('版本'),
-            subtitle: Text(_appVersion.isEmpty ? '1.0.3' : _appVersion),
+            subtitle: Text(_appVersion.isEmpty ? '1.0.4' : _appVersion),
           ),
         ],
       ),

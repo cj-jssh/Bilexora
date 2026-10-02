@@ -938,10 +938,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     /// 文本行：宽度受限，自动换行。
     /// 在有高亮词时用 RichText 标记背景色。
     /// 双语模式下额外包裹 GestureDetector 实现逐词点击查词。
-    Widget textLine(String text, TextStyle style) {
+    /// [allowLookup] 为 false 时不包 SelectableText/查词 Listener：
+    /// 译文行只需展示、无需点词查词, 用轻量 Text 大幅降低widget数量,
+    /// 是双语模式下翻页卡顿的关键优化之一。
+    Widget textLine(String text, TextStyle style, {bool allowLookup = true}) {
 
       Widget textWidget;
-      if (_highlightedWord != null &&
+      if (!allowLookup) {
+        // 译文行: 轻量 Text, 不参与查词/选择
+        textWidget = Text(text, style: style, maxLines: null);
+      } else if (_highlightedWord != null &&
           _highlightedText == text &&
           _highlightWordStart != null) {
         textWidget = _buildHighlightedText(text, style,
@@ -960,7 +966,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       // 双语模式下给每行包裹 Listener + 持久化 GlobalKey，
       // TextPainter.getPositionForOffset 精确处理换行文本。
       // Listener.onPointerUp 从内向外冒泡，优先于外层 Listener。
-      if (bilingualEnabled && text.trim().isNotEmpty) {
+      // 译文行(allowLookup=false)不需要查词, 跳过这层重量级包装。
+      if (allowLookup && bilingualEnabled && text.trim().isNotEmpty) {
         final keyId = _lineKeyCounter++;
         final lineKey = _lineKeys.putIfAbsent(keyId, () => GlobalKey());
         return RepaintBoundary(
@@ -1034,7 +1041,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               children.add(spacerTap());
 
               if (hasT && showNow) {
-                children.add(textLine(displayTrans, transStyle));
+                // 译文行: 仅展示, 不参与查词, 用轻量 Text
+                children.add(textLine(displayTrans, transStyle, allowLookup: false));
               } else {
                 children.add(_buildTransPlaceholder(
                   index: s.charOffset,

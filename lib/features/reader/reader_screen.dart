@@ -91,6 +91,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   final List<double> _itemHeightCache = [];
   // 译文行译 GlobalKey (用于展开/折叠时锚点滚动补偿)
   final Map<int, GlobalKey> _translationKeys = {};
+  // 原文行 GlobalKey (用于精读定位当前可见句)
+  final Map<int, GlobalKey> _originalKeys = {};
 
 
   // 阅读计时
@@ -124,6 +126,17 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadBook());
     _scrollController.addListener(_onScroll);
     _startReadingTimer();
+    // 精读朗读完成回调（自动连播）
+    _tts.setCompletionHandler(_onIntensiveComplete);
+  }
+
+  void _onIntensiveComplete() {
+    if (!mounted || !_intensiveMode || _intensiveSentences.isEmpty) return;
+    if (ref.read(sentenceListeningAutoPlayProvider)) {
+      _goToNextIntensiveSentence();
+    } else {
+      setState(() => _intensivePlaying = false);
+    }
   }
 
   @override
@@ -249,8 +262,11 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       );
       return;
     }
+    // 精读开启时定位到当前屏幕上的第一句
+    final visibleIdx = _findCurrentVisibleSentenceIndex();
     setState(() {
       _intensiveMode = true;
+      _intensiveSentenceIndex = visibleIdx;
       _showMenuPanel = false;
       _showControls = false;
     });
@@ -262,6 +278,30 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       _playIntensiveSentence();
     });
   }
+
+  /// 找出当前屏幕上第一条原句（其顶部恰好可见的最上方句子）
+  int _findCurrentVisibleSentenceIndex() {
+    final viewportTop = MediaQuery.of(context).padding.top + 40 + 20;
+    int best = -1;
+    double bestDist = double.infinity;
+    for (int i = 0; i < _intensiveSentences.length; i++) {
+      final charOffset = _intensiveSentences[i].charOffset;
+      final key = _originalKeys[charOffset];
+      final box = key?.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final top = box.localToGlobal(Offset.zero).dy;
+      if (top >= viewportTop - 1 && top < viewportTop + MediaQuery.of(context).size.height) {
+        // 取最早(最上方)一条可见句
+        final dist = top - viewportTop;
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      }
+    }
+    return best >= 0 ? best : 0;
+  }
+
 
   void _disableIntensiveMode() {
     _tts.stop();
@@ -291,9 +331,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// 将当前句对齐到屏幕首行
   void _alignIntensiveSentence([int? index]) {
     if (!_scrollController.hasClients) return;
-    final charOffset = _intensiveSentences[index ?? _intensiveSentenceIndex].charOffset;
-    final key = _translationKeys[charOffset];
-    final box = key?.currentContext?.findRenderObject() as RenderBox?;
+    final idx = (index ?? _intensiveSentenceIndex)
+        .clamp(0, (_intensiveSentences.length - 1).clamp(0, 1 << 30));
+    final charOffset = _intensiveSentences[idx].charOffset;
+    // 原文 key 优先（双语/单语都有原文行）
+    GlobalKey? key = _originalKeys[charOffset];
+    var box = key?.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) {
+      box = (_translationKeys[charOffset]
+              ?.currentContext?.findRenderObject()) as RenderBox?;
+    }
     if (box != null && box.hasSize) {
       final topGlobal = box.localToGlobal(Offset.zero).dy;
       final appBarH = MediaQuery.of(context).padding.top + 40 + 20; // 书名行高度
@@ -303,8 +350,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           (pos.pixels + delta).clamp(0.0, pos.maxScrollExtent));
       return;
     }
-    // 无 key（非双语）时按比例近似定位
-    final idx = index ?? _intensiveSentenceIndex;
+    // 无 key 时按比例近似定位
     final total = _intensiveSentences.length;
     if (total <= 0) return;
     final pos = _scrollController.position;
@@ -315,30 +361,50 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// 朗读当前句
   Future<void> _playIntensiveSentence() async {
     if (!_intensiveMode || _intensiveSentences.isEmpty) return;
-    final s = _intensiveSentences[_intensiveSentenceIndex];
     setState(() => _intensivePlaying = true);
     try {
+      final s = _intensiveSentences[_intensiveSentenceIndex
+          .clamp(0, _intensiveSentences.length - 1)];
       await _tts.setLanguage(_bookLanguage == 'zh' ? 'zh-CN' : 'en-US');
       await _tts.setSpeechRate(_intensiveRate);
       await _tts.setVolume(1.0);
       await _tts.speak(s.text);
-      // 朗读完成后若开启自动连播则切下一句
-      if (_intensiveMode && ref.read(sentenceListeningAutoPlayProvider)) {
-        _goToNextIntensiveSentence();
-      } else {
-        setState(() => _intensivePlaying = false);
-      }
+      // 完成后的连播由 _onIntensiveComplete 处理；这里不置 false，
+      // 以免与 completion handler 的 setState 竞争。
     } catch (e) {
       debugPrint('精读朗读失败: $e');
       setState(() => _intensivePlaying = false);
     }
   }
 
+  /// 当前句应展示的文本（与阅读器双语展示逻辑一致）
+  String _intensiveDisplayText() {
+    if (_intensiveSentences.isEmpty) return '';
+    final s = _intensiveSentences[_intensiveSentenceIndex
+        .clamp(0, _intensiveSentences.length - 1)];
+    final bilingualEnabled = ref.read(bilingualEnabledProvider);
+    final nativeLang = ref.read(nativeLanguageProvider);
+    final shouldSwap = bilingualEnabled && _bookLanguage == nativeLang;
+    final t = _translationMap[s.charOffset] ?? '';
+    final hasT = t.isNotEmpty;
+    // 与阅读器同一展示规则：shouldSwap 且已有译文时展示译文(学习语言)
+    return shouldSwap && hasT ? t : s.text;
+  }
+
   void _goToPrevIntensiveSentence() {
-    if (_intensiveSentenceIndex <= 0) return;
+    if (_intensiveSentenceIndex <= 0) {
+      // 已在首句：重新朗读当前句
+      _tts.stop();
+      _playIntensiveSentence();
+      return;
+    }
     _tts.stop();
-    setState(() => _intensiveSentenceIndex--);
+    setState(() {
+      _intensiveSentenceIndex--;
+      _intensivePlaying = true;
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _alignIntensiveSentence();
       _playIntensiveSentence();
     });
@@ -350,8 +416,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       return;
     }
     _tts.stop();
-    setState(() => _intensiveSentenceIndex++);
+    setState(() {
+      _intensiveSentenceIndex++;
+      _intensivePlaying = true;
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _alignIntensiveSentence();
       _playIntensiveSentence();
     });
@@ -360,10 +430,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// 精读底部控制区：语速 + 上一句/下一句
   Widget _buildIntensiveControls() {
     const white = Colors.white;
-    final sentence = _intensiveSentences.isEmpty
-        ? null
-        : _intensiveSentences[_intensiveSentenceIndex
-            .clamp(0, _intensiveSentences.length - 1)];
+    final displayText = _intensiveDisplayText();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -376,7 +443,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             children: [
               Expanded(
                 child: Text(
-                  sentence?.text ?? '',
+                  displayText,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: white, fontSize: 13, height: 1.3),
@@ -1760,46 +1827,54 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (lookupEnabled && text.trim().isNotEmpty) {
       final keyId = _lineKeyCounter++;
       final lineKey = _lineKeys.putIfAbsent(keyId, () => GlobalKey());
+      final origKey = _originalKeys.putIfAbsent(charOffset, () => GlobalKey());
       return RepaintBoundary(
-        child: Listener(
-          onPointerUp: (event) {
-            final elapsed =
-                DateTime.now().difference(_ptrDownTime).inMilliseconds;
-            if (!_ptrDown || elapsed >= 300 ||
-                (event.position - _ptrDownPos).distance >= 12) {
-              return;
-            }
-            if (!ref.read(bilingualEnabledProvider)) return;
-            final renderBox =
-                lineKey.currentContext?.findRenderObject() as RenderBox?;
-            if (renderBox == null) return;
-            final localPos = renderBox.globalToLocal(event.position);
-            final tp = TextPainter(
-              text: TextSpan(text: text, style: style),
-              textDirection: TextDirection.ltr,
-            )..layout(maxWidth: renderBox.size.width);
-            if (localPos.dx < 0 || localPos.dx > tp.width ||
-                localPos.dy < 0 || localPos.dy > tp.height) {
-              return;
-            }
-            final charOffset_ = tp.getPositionForOffset(localPos).offset;
-            if (charOffset_ < 0 || charOffset_ >= text.length) return;
-            final result_ = _extractWordAtOffset(text, charOffset_);
-            if (result_ == null || result_.word.length < 2) return;
-            _wordTappedFromGesture = true;
-            setState(() {
-              _highlightedWord = result_.word;
-              _highlightedText = text;
-              _highlightWordStart = result_.start;
-              _highlightWordEnd = result_.end;
-            });
-            _showWordLookup(result_.word);
-          },
-          child: KeyedSubtree(key: lineKey, child: base),
+        child: KeyedSubtree(
+          key: origKey,
+          child: Listener(
+            onPointerUp: (event) {
+              final elapsed =
+                  DateTime.now().difference(_ptrDownTime).inMilliseconds;
+              if (!_ptrDown || elapsed >= 300 ||
+                  (event.position - _ptrDownPos).distance >= 12) {
+                return;
+              }
+              if (!ref.read(bilingualEnabledProvider)) return;
+              final renderBox =
+                  lineKey.currentContext?.findRenderObject() as RenderBox?;
+              if (renderBox == null) return;
+              final localPos = renderBox.globalToLocal(event.position);
+              final tp = TextPainter(
+                text: TextSpan(text: text, style: style),
+                textDirection: TextDirection.ltr,
+              )..layout(maxWidth: renderBox.size.width);
+              if (localPos.dx < 0 || localPos.dx > tp.width ||
+                  localPos.dy < 0 || localPos.dy > tp.height) {
+                return;
+              }
+              final charOffset_ = tp.getPositionForOffset(localPos).offset;
+              if (charOffset_ < 0 || charOffset_ >= text.length) return;
+              final result_ = _extractWordAtOffset(text, charOffset_);
+              if (result_ == null || result_.word.length < 2) return;
+              _wordTappedFromGesture = true;
+              setState(() {
+                _highlightedWord = result_.word;
+                _highlightedText = text;
+                _highlightWordStart = result_.start;
+                _highlightWordEnd = result_.end;
+              });
+              _showWordLookup(result_.word);
+            },
+            child: KeyedSubtree(key: lineKey, child: base),
+          ),
         ),
       );
     }
-    return RepaintBoundary(child: base);
+    // 非查词路径：也为原文行注册可定位的 key（精读定位用）
+    final origKey = _originalKeys.putIfAbsent(charOffset, () => GlobalKey());
+    return RepaintBoundary(
+      child: KeyedSubtree(key: origKey, child: base),
+    );
   }
 
   /// 译文行: 轻量 Text, 仅展示, 不参与查词。

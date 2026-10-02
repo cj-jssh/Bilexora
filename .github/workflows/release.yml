@@ -77,12 +77,8 @@ jobs:
         run: flutter analyze lib test --no-fatal-infos --fatal-warnings
 
 
-  # 暂时关闭: 本轮只调试 iOS 未签名 IPA。
-  # 用 job 级 if: false 而不是删除/注释整段, 保留全部构建逻辑,
-  # 恢复时只需移除下面这行。
   flutter-build-android:
     name: Build Android
-    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:
@@ -754,7 +750,6 @@ jobs:
   release:
     name: Create Release
     # 只在推送 tag 时发布; workflow_dispatch 手动触发只跑构建, 不建 Release。
-    # 注: Android job 当前已用 if: false 关闭, 下载 APK 的步骤会自动跳过。
     if: github.event_name != 'workflow_dispatch'
     needs:
       - flutter-test

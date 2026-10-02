@@ -536,7 +536,7 @@ final showNow = hasT && (showMode == 'on_tap' ? isRev : !isRev);
 
 ### 阅读设置页（母语 / 双语 / 逐句精听）
 
-设置首页提供「阅读」入口框，点击进入 `LearningSettingsScreen`（`lib/features/settings/learning_settings_screen.dart`）：
+设置首页「阅读」分组下提供一个「学习」菜单项，点击进入 `LearningSettingsScreen`（`lib/features/settings/learning_settings_screen.dart`）：
 
 - **母语**：选择母语（13 种预定义语言）
 - **双语阅读**：开关 + 译文展示方式 + 学习语言 + 阅读习惯布局

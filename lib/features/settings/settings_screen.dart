@@ -148,67 +148,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const Divider(),
 
-          // 阅读（点击进入学习设置页）
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                ),
-              ),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const LearningSettingsScreen(),
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                      child: Text(
-                        '阅读',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: Theme.of(context).colorScheme.outline,
-                        ),
-                      ),
-                    ),
-                    ListTile(
-                      dense: true,
-                      leading: const Icon(Icons.flag_outlined),
-                      title: Text(
-                        languageNames[ref.watch(nativeLanguageProvider)] ?? '母语',
-                      ),
-                      subtitle: const Text('母语'),
-                      trailing: const Icon(Icons.chevron_right),
-                    ),
-                    const Divider(height: 1, indent: 56),
-                    ListTile(
-                      dense: true,
-                      leading: const Icon(Icons.headphones_outlined),
-                      title: Text(
-                        ref.watch(bilingualEnabledProvider) ? '已开启' : '已关闭',
-                        style: TextStyle(
-                          color: ref.watch(bilingualEnabledProvider)
-                              ? Theme.of(context).colorScheme.primary
-                              : null,
-                        ),
-                      ),
-                      subtitle: const Text('双语阅读/逐句精听'),
-                      trailing: const Icon(Icons.chevron_right),
-                    ),
-                  ],
-                ),
+          // 阅读（学习菜单项，跳转学习设置页）
+          _SectionHeader(title: '阅读'),
+          ListTile(
+            leading: const Icon(Icons.menu_book_outlined),
+            title: const Text('学习'),
+            subtitle: const Text('母语 / 双语阅读 / 逐句精听'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const LearningSettingsScreen(),
               ),
             ),
           ),
+          const Divider(),
 
           // 翻译
           _SectionHeader(title: '翻译'),

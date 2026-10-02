@@ -39,6 +39,8 @@ dependencies:
   bergamot_translator:
     path: plugins/bergamot_translator
   flutter_tts: ^4.2.5
+  # 运行时读取构建版本号 (与 pubspec.yaml 的 version 保持一致, 免手工维护)
+  package_info_plus: ^10.2.2
 
 hooks:
   user_defines:

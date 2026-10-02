@@ -905,7 +905,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       if (bilingualEnabled && text.trim().isNotEmpty) {
         final keyId = _lineKeyCounter++;
         final lineKey = _lineKeys.putIfAbsent(keyId, () => GlobalKey());
-        return Listener(
+        return RepaintBoundary(
+          child: Listener(
           onPointerUp: (event) {
             final elapsed = DateTime.now().difference(_ptrDownTime).inMilliseconds;
             if (!_ptrDown || elapsed >= 300 || (event.position - _ptrDownPos).distance >= 12) return;
@@ -936,10 +937,11 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             _showWordLookup(result_.word);
           },
           child: KeyedSubtree(key: lineKey, child: textWidget),
-        );
+        ),
+      ); // 闭合 RepaintBoundary
       }
 
-      return textWidget;
+      return RepaintBoundary(child: textWidget);
     }
 
 
@@ -1002,6 +1004,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
 
     children.add(spacerTap(h: 80));
+
+    // 清理不再使用的行 key, 防止滚动加载多章后 _lineKeys 无界增长
+    // (键按本次 build 实际使用数量区间 [0, _lineKeyCounter) 收敛)
+    if (_lineKeys.length > _lineKeyCounter * 2 + 64) {
+      _lineKeys.removeWhere((k, _) => k >= _lineKeyCounter);
+    }
 
     // 用 Listener 整体监听指针：不加入手势竞技场，
     // 因此不会阻断滚动，也不会吞掉 SelectableText 的长按选词。
@@ -1282,32 +1290,29 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// 毛玻璃占位框，高度 ≈ 一行译文，点击展开译文
   Widget _buildTransPlaceholder({required int index, required bool hasT, required bool noTrans}) {
     final placeholderHeight = _fontSize * _lineHeight * 0.9;
-    // 占满整宽，毛玻璃内置于中央
+    // 占满整宽。
+    // 注意: 这里刻意不用 BackdropFilter(毛玻璃)——每个未翻译句子都会实例化一个
+    // BackdropFilter + 高斯模糊, 触发 GPU saveLayer 并随滚动反复逐句重绘,
+    // 是双语模式翻页卡顿的主要来源。改用纯色背景占位, 不触发 saveLayer。
     return SizedBox(
       width: double.infinity,
       child: GestureDetector(
         onTap: () => _tapTranslationArea(index),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-            child: Container(
-              height: placeholderHeight,
-              decoration: BoxDecoration(
-                color: _textColor.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: _textColor.withValues(alpha: 0.1)),
-              ),
-              alignment: Alignment.centerLeft,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Text(
-                noTrans ? '暂无对应译文' : '点击显示译文',
-                style: TextStyle(
-                  fontSize: _fontSize * 0.85,
-                  color: _textColor.withValues(alpha: 0.4),
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
+        child: Container(
+          height: placeholderHeight,
+          decoration: BoxDecoration(
+            color: _textColor.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: _textColor.withValues(alpha: 0.1)),
+          ),
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Text(
+            noTrans ? '暂无对应译文' : '点击显示译文',
+            style: TextStyle(
+              fontSize: _fontSize * 0.85,
+              color: _textColor.withValues(alpha: 0.4),
+              fontStyle: FontStyle.italic,
             ),
           ),
         ),

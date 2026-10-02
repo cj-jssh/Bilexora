@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../../app/router.dart';
 import '../../core/database/library_database.dart';
 import '../../core/services/dictionary_manager.dart';
@@ -52,11 +53,23 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final LibraryDatabase _db = LibraryDatabase();
+  // 运行时读取的构建版本号 (与 pubspec.yaml 的 version 保持一致)
+  String _appVersion = '';
 
   @override
   void initState() {
     super.initState();
+    _loadAppVersion();
     _loadAllSettings();
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) setState(() => _appVersion = info.version);
+    } catch (_) {
+      // 读取失败时保留空串, 兜底显示 pubspec 同步的版本
+    }
   }
 
   Future<void> _loadAllSettings() async {
@@ -225,10 +238,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
           // 关于
           _SectionHeader(title: '关于'),
-          const ListTile(
-            leading: Icon(Icons.info_outline),
-            title: Text('版本'),
-            subtitle: Text('1.0.0'),
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('版本'),
+            subtitle: Text(_appVersion.isEmpty ? '1.0.1' : _appVersion),
           ),
         ],
       ),

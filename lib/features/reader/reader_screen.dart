@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path/path.dart' as p;
 import '../../core/models/models.dart';
 import '../../core/storage/book_package_manager.dart';
@@ -20,6 +21,7 @@ import '../../core/storage/translation_file.dart';
 import 'widgets/word_lookup_popup.dart';
 
 import '../settings/translation_engine_screen.dart';
+import '../settings/learning_settings_screen.dart';
 
 class ReaderScreen extends ConsumerStatefulWidget {
   final String bookId;
@@ -107,6 +109,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   int? _highlightWordStart;
   int? _highlightWordEnd;
 
+  // ── 精读模式（逐句精听） ─────────────────────────────
+  bool _intensiveMode = false;
+  final List<({String text, int charOffset})> _intensiveSentences = [];
+  int _intensiveSentenceIndex = 0;
+  bool _intensivePlaying = false;
+  double _intensiveRate = 0.4;
+  final FlutterTts _tts = FlutterTts();
+
   @override
   void initState() {
     super.initState();
@@ -124,6 +134,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _controlHideTimer?.cancel();
     _readingTimer?.cancel();
     _prefetchTimer?.cancel();
+    _tts.stop();
     _saveReadingTime();
     _saveReaderSettings();
     try { _invalidateHomeProviders(); } catch (_) {}
@@ -150,6 +161,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             case 'dark': _textColor = Colors.white70; _bgColor = const Color(0xFF1E1E1E);
           }
         });
+      }
+    });
+    // 精读朗读语速
+    db.getSetting('sentence_listening_rate').then((v) {
+      if (v != null && mounted) {
+        setState(() => _intensiveRate = double.tryParse(v) ?? 0.4);
       }
     });
     // 从 DB 加载双语设置并同步到 provider，确保阅读器启动时设置生效
@@ -216,6 +233,245 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       });
     }
   }
+
+  // ── 精读模式 ─────────────────────────────────────
+
+  /// 精读开关：收集全书当前已加载句子，对齐当前句到首行并开始朗读
+  void _toggleIntensiveMode() {
+    if (_intensiveMode) {
+      _disableIntensiveMode();
+      return;
+    }
+    _buildIntensiveSentences();
+    if (_intensiveSentences.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('暂无朗读内容'), behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
+    setState(() {
+      _intensiveMode = true;
+      _showMenuPanel = false;
+      _showControls = false;
+    });
+    _controlHideTimer?.cancel();
+    // 默认将当前句对齐到屏幕首行并开始阅读
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _alignIntensiveSentence();
+      _playIntensiveSentence();
+    });
+  }
+
+  void _disableIntensiveMode() {
+    _tts.stop();
+    setState(() {
+      _intensiveMode = false;
+      _intensivePlaying = false;
+    });
+  }
+
+  /// 从当前章节的段落句子中收集课文（保留自然顺序）
+  void _buildIntensiveSentences() {
+    _intensiveSentences.clear();
+    for (final block in _allBlocks) {
+      block.when(
+        paragraph: (p) {
+          for (final s in p.sentences) {
+            if (s.text.trim().isNotEmpty) {
+              _intensiveSentences.add((text: s.text, charOffset: s.charOffset));
+            }
+          }
+        },
+        image: (_, _) {},
+      );
+    }
+  }
+
+  /// 将当前句对齐到屏幕首行
+  void _alignIntensiveSentence([int? index]) {
+    if (!_scrollController.hasClients) return;
+    final charOffset = _intensiveSentences[index ?? _intensiveSentenceIndex].charOffset;
+    final key = _translationKeys[charOffset];
+    final box = key?.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize) {
+      final topGlobal = box.localToGlobal(Offset.zero).dy;
+      final appBarH = MediaQuery.of(context).padding.top + 40 + 20; // 书名行高度
+      final delta = topGlobal - appBarH;
+      final pos = _scrollController.position;
+      _scrollController.jumpTo(
+          (pos.pixels + delta).clamp(0.0, pos.maxScrollExtent));
+      return;
+    }
+    // 无 key（非双语）时按比例近似定位
+    final idx = index ?? _intensiveSentenceIndex;
+    final total = _intensiveSentences.length;
+    if (total <= 0) return;
+    final pos = _scrollController.position;
+    _scrollController.jumpTo(
+        pos.maxScrollExtent * idx / total);
+  }
+
+  /// 朗读当前句
+  Future<void> _playIntensiveSentence() async {
+    if (!_intensiveMode || _intensiveSentences.isEmpty) return;
+    final s = _intensiveSentences[_intensiveSentenceIndex];
+    setState(() => _intensivePlaying = true);
+    try {
+      await _tts.setLanguage(_bookLanguage == 'zh' ? 'zh-CN' : 'en-US');
+      await _tts.setSpeechRate(_intensiveRate);
+      await _tts.setVolume(1.0);
+      await _tts.speak(s.text);
+      // 朗读完成后若开启自动连播则切下一句
+      if (_intensiveMode && ref.read(sentenceListeningAutoPlayProvider)) {
+        _goToNextIntensiveSentence();
+      } else {
+        setState(() => _intensivePlaying = false);
+      }
+    } catch (e) {
+      debugPrint('精读朗读失败: $e');
+      setState(() => _intensivePlaying = false);
+    }
+  }
+
+  void _goToPrevIntensiveSentence() {
+    if (_intensiveSentenceIndex <= 0) return;
+    _tts.stop();
+    setState(() => _intensiveSentenceIndex--);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _alignIntensiveSentence();
+      _playIntensiveSentence();
+    });
+  }
+
+  void _goToNextIntensiveSentence() {
+    if (_intensiveSentenceIndex >= _intensiveSentences.length - 1) {
+      setState(() => _intensivePlaying = false);
+      return;
+    }
+    _tts.stop();
+    setState(() => _intensiveSentenceIndex++);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _alignIntensiveSentence();
+      _playIntensiveSentence();
+    });
+  }
+
+  /// 精读底部控制区：语速 + 上一句/下一句
+  Widget _buildIntensiveControls() {
+    const white = Colors.white;
+    final sentence = _intensiveSentences.isEmpty
+        ? null
+        : _intensiveSentences[_intensiveSentenceIndex
+            .clamp(0, _intensiveSentences.length - 1)];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 当前句 + 进度
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  sentence?.text ?? '',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: white, fontSize: 13, height: 1.3),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${_intensiveSentenceIndex + 1}/${_intensiveSentences.length}',
+                style: TextStyle(color: white.withValues(alpha: 0.6), fontSize: 12),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // 语速滑动条
+          Row(
+            children: [
+              Icon(Icons.speed, color: white.withValues(alpha: 0.7), size: 18),
+              Expanded(
+                child: Slider(
+                  value: _intensiveRate,
+                  min: 0.2,
+                  max: 0.7,
+                  divisions: 10,
+                  label: '${(_intensiveRate * 100).round()}%',
+                  activeColor: const Color(0xFF4CAF50),
+                  inactiveColor: white.withValues(alpha: 0.2),
+                  onChanged: (v) {
+                    setState(() => _intensiveRate = v);
+                    LibraryDatabase().setSetting(
+                        'sentence_listening_rate', v.toString());
+                  },
+                ),
+              ),
+              SizedBox(
+                width: 40,
+                child: Text('${(_intensiveRate * 100).round()}%',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(color: white.withValues(alpha: 0.7), fontSize: 12)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          // 播放/暂停 + 上一句/下一句
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _ctrlBtn(Icons.skip_previous, '上一句', _goToPrevIntensiveSentence),
+              GestureDetector(
+                onTap: () {
+                  if (_intensivePlaying) {
+                    _tts.stop();
+                    setState(() => _intensivePlaying = false);
+                  } else {
+                    _playIntensiveSentence();
+                  }
+                },
+                child: Container(
+                  width: 56, height: 56,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF4CAF50), shape: BoxShape.circle,
+                  ),
+                  child: Icon(_intensivePlaying ? Icons.pause : Icons.play_arrow,
+                      color: Colors.white, size: 30),
+                ),
+              ),
+              _ctrlBtn(Icons.skip_next, '下一句', _goToNextIntensiveSentence),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: _disableIntensiveMode,
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  child: Icon(Icons.close, color: white.withValues(alpha: 0.7), size: 20),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _ctrlBtn(IconData icon, String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, color: Colors.white, size: 28),
+          const SizedBox(height: 2),
+          Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10)),
+        ]),
+      ),
+    );
+  }
+
 
   Future<void> _loadBook() async {
     try {
@@ -897,6 +1153,23 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               ]),
             ),
 
+          // ── 精读控制区（底部） ──
+          if (_intensiveMode)
+            Positioned(
+              left: 0, right: 0, bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.75),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+                  ),
+                  child: _buildIntensiveControls(),
+                ),
+              ),
+            ),
+
           // ── 查词面板（内嵌在 reader 的 Stack 中，不阻挡阅读区触摸） ──
           if (_lookupPanelVisible && _lookupWord != null)
             Positioned(
@@ -1018,21 +1291,38 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
 
     // ── 点击命中: 用 TextPainter 精确算出点击点所在的词 ──────
-    Widget row(BuildContext ctx, int i, _ReaderItem it) => it.when(
-      separator: () => SizedBox(width: double.infinity,
-          height: i > 0 ? 4 : 12),
-      original: (text, charOffset) => _buildOriginalRow(
-          text, charOffset, origStyle, bilingualEnabled),
-      translation: (text, charOffset) => _buildTranslationRow(
-          text, charOffset, transStyle, shouldSwap),
-      placeholder: (charOffset, noTrans) =>
-          _buildTransPlaceholder(index: charOffset, hasT: false, noTrans: noTrans),
-      image: (file, altText) => (file != null && file.existsSync())
-          ? ClipRRect(borderRadius: BorderRadius.circular(4),
-            child: Image.file(file, fit: BoxFit.contain,
-              errorBuilder: (_, _, _) => _imagePlaceholder(altText)))
-          : _imagePlaceholder(altText),
-    );
+    Widget row(BuildContext ctx, int i, _ReaderItem it) {
+      final active = _intensiveMode &&
+          it.type == 'original' &&
+          it.charOffset == _intensiveSentences
+              [_intensiveSentenceIndex.clamp(0, _intensiveSentences.length - 1)]
+              .charOffset;
+      final widget = it.when(
+        separator: () => SizedBox(width: double.infinity,
+            height: i > 0 ? 4 : 12),
+        original: (text, charOffset) => _buildOriginalRow(
+            text, charOffset, origStyle, bilingualEnabled),
+        translation: (text, charOffset) => _buildTranslationRow(
+            text, charOffset, transStyle, shouldSwap),
+        placeholder: (charOffset, noTrans) =>
+            _buildTransPlaceholder(index: charOffset, hasT: false, noTrans: noTrans),
+        image: (file, altText) => (file != null && file.existsSync())
+            ? ClipRRect(borderRadius: BorderRadius.circular(4),
+              child: Image.file(file, fit: BoxFit.contain,
+                errorBuilder: (_, _, _) => _imagePlaceholder(altText)))
+            : _imagePlaceholder(altText),
+      );
+      if (!active) return widget;
+      return Container(
+        decoration: BoxDecoration(
+          color: _intensiveMode
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.18)
+              : null,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: widget,
+      );
+    }
 
     // 清理不再使用的行 key, 防止滚动加载多章后无界增长
     if (_lineKeys.length > _lineKeyCounter * 2 + 64) {
@@ -1096,7 +1386,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               ),
               // 底部留白
               SliverToBoxAdapter(
-                  child: SizedBox(height: 80)),
+                  child: SizedBox(height: 80 + (_intensiveMode ? 220 : 0))),
+
             ],
           ),
         ),
@@ -1540,6 +1831,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             Container(height: 1, color: Colors.white.withValues(alpha: 0.1)),
             _MenuTile(icon: Icons.language, title: '双语阅读', subtitle: _bilingualStatus(),
               onTap: () { setState(() => _showMenuPanel = false); _showBilingualSettingsInReader(); }),
+            Container(height: 1, color: Colors.white.withValues(alpha: 0.1)),
+            _MenuTile(icon: Icons.headphones_outlined, title: '精读', subtitle: _intensiveMode ? '已开启' : '开启后逐句朗读',
+              trailing: Icon(_intensiveMode ? Icons.toggle_on : Icons.toggle_off, color: _intensiveMode ? const Color(0xFF4CAF50) : Colors.white.withValues(alpha: 0.6), size: 26),
+              onTap: () { _saveReadingTime(); _toggleIntensiveMode(); }),
             Container(height: 1, color: Colors.white.withValues(alpha: 0.1)),
             _MenuTile(icon: Icons.translate, title: '翻译', subtitle: '翻译当前章节',
               onTap: () { setState(() => _showMenuPanel = false); _showTranslateOptions(); }),

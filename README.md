@@ -47,11 +47,13 @@
 | 🔄 多翻译引擎 | ✅ | AI 引擎（OpenAI 兼容 API）与本地离线 Bergamot 引擎 |
 | 💻 离线翻译 | ✅ | Bergamot (Mozilla NMT) 端侧 CPU 推理，无需联网 |
 | ✍️ 点句翻译 | ✅ | 阅读时点击任意句子即用当前引擎翻译并持久化 |
-| 📊 阅读统计 | ✅ | 阅读进度、今日时长、章节导航 |
-| 🔔 通知中心 | ✅ | 翻译完成等事件通知 |
+| 📊 阅读统计 | ✅ | 阅读进度、今日时长、章节导航、查词次数统计 |
+| 🔔 通知中心 | ✅ | 翻译完成等事件通知，未读红点角标，逐条已读标记 |
+| 🔊 朗读 (逐句精听) | 🚧 | 设置与开关已就绪，阅读器触发衔接中 |
+| 📊 存储管理 | ✅ | 设置内统计存储用量，一键清除缓存（词典缓存/临时文件） |
 | 📚 生词本 | 🚧 | 数据层已就绪，交互完善中 |
 | 🔍 书源搜索 | 🚧 | 界面占位，书源插件系统规划中 |
-| 🔊 TTS / 校对 / 词典 | 📋 | 规划中 |
+| 🛠 校对 / 词典 | 📋 | 规划中 |
 
 ### 核心原则
 
@@ -396,10 +398,10 @@ await fm.listAvailableLanguages();              // ['zh', 'fr']
 | `books` | 书库索引 | id, title, author, language, cover, path, added_at, last_read_at |
 | `reading_progress` | 阅读进度 | book_id, chapter, paragraph, percentage, updated_at |
 | `vocabulary` | 生词本 | word, translation, book_id, review_count, is_mastered |
-| `dictionary_cache` | 词典缓存 | word, language, translation, phonetic |
+| `dictionary_cache` | 词典缓存 | word, language, translation, phonetic（可一键清空） |
 | `settings` | KV 存储 | key, value |
 | `reading_time` | 阅读时长 | book_id, date, seconds |
-| `notifications` | 通知 | type, title, body, book_id, read |
+| `notifications` | 通知 | type, title, body, book_id, read（未读红点/逐条已读/全部已读） |
 | `translation_status` | 翻译任务 | book_id, language, sentence_count, engine_id |
 
 ### 阅读进度写入策略
@@ -477,6 +479,29 @@ fm.appendTranslation() 持久化（同章合并，不丢已有译文）
 
 ## 📖 阅读器交互
 
+### 翻译完成提示
+
+翻译完成等一次性提示使用**顶部横幅**（`showTopBanner`，`lib/core/utils/top_banner.dart`）：从屏幕顶部滑入，驻留约 2 秒后自动消失，不遮挡正文。
+
+每个事件同时以**通知**形式写入 SQLite `notifications` 表，供首页通知中心查看。
+
+### 通知中心
+
+首页右上角铃铛带有**未读数角标**（定时自动刷新，翻译完成等新通知即时反映）。
+
+- 每条通知带**未读红点**，已读项文案变淡
+- 点击单项标记已读；提供「全部已读」一键清空角标
+- 翻译完成等开始/结束通知形成有头有尾的提示链路
+
+### 存储管理
+
+设置 → 存储：
+
+- **存储用量**：统计文档 + 缓存 + 临时目录的总占用（点击可刷新）
+- **清除缓存**：二次确认后清理系统临时/缓存目录与 `dictionary_cache` 词典缓存表，释放空间并提示
+
+代码：`lib/core/storage/storage_service.dart`，字节格式化 `formatBytes`。
+
 ### 双语布局
 
 | 模式 | 布局 |
@@ -508,6 +533,16 @@ final showNow = hasT && (showMode == 'on_tap' ? isRev : !isRev);
 ### 排版设置
 
 字号、行高、字间距独立可调；亮色 / 护眼（暖色）/ 暗色三种主题；设置持久化于 SQLite，与书籍内容完全解耦。
+
+### 阅读设置页（母语 / 双语 / 逐句精听）
+
+设置首页提供「阅读」入口框，点击进入 `LearningSettingsScreen`（`lib/features/settings/learning_settings_screen.dart`）：
+
+- **母语**：选择母语（13 种预定义语言）
+- **双语阅读**：开关 + 译文展示方式 + 学习语言 + 阅读习惯布局
+- **逐句精听**：开启后阅读时逐句朗读；提供朗读语速滑块与自动连播开关
+
+设置项持久化于 SQLite `settings` 表（`sentence_listening_enabled` / `sentence_listening_rate` / `sentence_listening_auto` 等）。
 
 ---
 
@@ -541,9 +576,11 @@ lib/
 │   │   ├── book_package_manager.dart  # Book Package 目录管理
 │   │   ├── content_dat_reader.dart    # content.dat 读取器
 │   │   ├── content_dat_writer.dart    # content.dat 写入器
+│   │   ├── storage_service.dart       # 存储用量统计 + 缓存清理
 │   │   └── translation_file.dart      # content_{lang}.dat 读写（含 Varint 编解码）
 │   ├── utils/
 │   │   ├── text_utils.dart            # 分句等文本处理
+│   │   ├── top_banner.dart            # 全局顶部横幅（Overlay，翻译完成等提示）
 │   │   ├── translation_utils.dart     # AI 翻译调用 + 错误消息转译
 │   │   └── utils.dart                 # barrel 导出
 │   └── state/
@@ -551,14 +588,15 @@ lib/
 │
 ├── features/                          # 功能模块
 │   ├── book_source/book_source_screen.dart        # 书源（占位）
-│   ├── home/home_screen.dart                      # 首页：继续阅读 / 今日时长 / 通知
+│   ├── home/home_screen.dart                      # 首页：继续阅读 / 今日时长 / 通知（未读角标 + 逐条已读）
 │   ├── library/
 │   │   ├── library_screen.dart                    # 书库 + 全书批量翻译
 │   │   ├── translation_management_screen.dart     # 翻译任务管理（进度/取消）
 │   │   └── translation_detail_screen.dart         # 单书译文详情（引擎分布/删除）
 │   ├── reader/reader_screen.dart                  # 阅读器（核心 UI：排版/双语/点句翻译）
 │   ├── settings/
-│   │   ├── settings_screen.dart                   # 语言/排版/展示设置
+│   │   ├── settings_screen.dart                   # 语言/排版/展示/存储/清除缓存设置
+│   │   ├── learning_settings_screen.dart          # “阅读”学习设置页：母语/双语/逐句精听
 │   │   └── translation_engine_screen.dart         # 翻译引擎配置 + 语言包下载
 │   ├── translation/
 │   │   ├── bergamot_flow.dart                     # 共享：方向解析 + 模型下载保障
@@ -600,6 +638,7 @@ flutter test
 |----------|----------|
 | `content_dat_roundtrip_test.dart` | 多章节写入→读取后 globalIndex 连续且与文本一一对应；Varint 大数值边界（>2²¹）；含图片块时句子不串位 |
 | `translation_file_test.dart` | 单章读写往返；跨章分组与空位占位；**连续逐句追加互不覆盖**；**同章二次追加合并**；引擎隔离删除；坏 magic/截断/垃圾字节不抛异常 |
+| `storage_service_test.dart` | `formatBytes` 字节格式化 B/KB/MB/GB 边界 |
 
 ---
 
@@ -629,15 +668,30 @@ flutter build ios --release
 # 然后通过 Xcode 归档导出 IPA
 ```
 
+### CI 自动发布
+
+`.github/workflows/release.yml` 在推送 `v*` 语义化 tag 时自动执行：
+
+1. `flutter test` + `flutter analyze`
+2. 构建 Android APK（arm64）与未签名 iOS IPA（附 bergamot 原生二进制复用）
+3. 生成 GitHub Release，发布说明**按 conventional commit 类型自动分类**提交变更：
+   - ✨ 新功能（feat）
+   - 🐛 Bug 修复（fix）
+   - ⚡️ 性能优化（perf）
+   - ♻️ 重构（refactor/revert）
+   - 📝 其他变更
+
+对比区间为**上一版本 tag → 当前 tag**，无对应类型时显示“无”。
+
 ---
 
 ## 🧭 后续规划
 
 - [ ] 书源插件系统（网络搜书 / 下载）
 - [ ] 人工逐句校对与多版本管理
-- [ ] 词典查询 UI（点词查询 + 词典缓存）
+- [ ] 词典查询 UI 完善（点词查询 + 现有词典缓存联动）
 - [ ] 生词本交互完善与复习
-- [ ] TTS 朗读
+- [ ] 阅读器内接入逐句精听（TTS 朗读：当前设置页已提供语速/自动连播开关）
 - [ ] Anki 导出
 - [ ] PDF 导入
 - [ ] 阅读统计图表

@@ -526,13 +526,26 @@ jobs:
 
           PBX=ios/Runner.xcodeproj/project.pbxproj
 
-          sed -i '' '/DEVELOPMENT_TEAM/d' "$PBX"
-          perl -i -pe 's/CODE_SIGN_IDENTITY = \".*\"/CODE_SIGN_IDENTITY = \"\";/g' "$PBX"
-          perl -i -pe 's/\"CODE_SIGN_IDENTITY\[[^\"]*\]\" = \".*\"/\"CODE_SIGN_IDENTITY\" = \"\";/g' "$PBX"
+          # 注意 pbxproj 里的键是带引号且带条件的:
+          #     "CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
+          # 旧写法 's/CODE_SIGN_IDENTITY = ".*/CODE_SIGN_IDENTITY = "";/g' 有两处错误:
+          #   1) `.*` 贪婪吐到行尾, 把条件 [sdk=iphoneos*] 和结尾的 `;` 一起吃掉;
+          #   2) 替换文本自己又补了一个 `;`, 于是产出 `"CODE_SIGN_IDENTITY" = "";;`,
+          #      双分号直接让 project.pbxproj 解析失败 ->
+          #      xcodebuild: 「The project 'Runner' is damaged ... parse error」,
+          #      连带 pod install 也失败。
+          # 这里用精确正则: 保留键名与 [sdk=...] 条件, 只把值置空。
+          perl -i -pe 's/("?CODE_SIGN_IDENTITY(?:\[[^\]]*\])?"? *= *)"[^"]*";/${1}"";/g' "$PBX"
 
           echo '=== 签名相关字段 ==='
           grep -nE 'CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_' "$PBX" || true
+
+          # 硬校验: 不能残留 DEVELOPMENT_TEAM, 也不能出现会让解析器报错的 `;;`
           ! grep -q 'DEVELOPMENT_TEAM' "$PBX"
+          ! grep -q ';;' "$PBX"
+
+          # pbxproj 必须仍是合法 plist (提前于 xcodebuild 发现损坏)
+          plutil -lint "$PBX"
 
       # ------------------------------------------------------------
       # 生成原生工程 (pod install)

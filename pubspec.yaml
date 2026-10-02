@@ -1,7 +1,7 @@
 name: bilexora
 description: "Bilexora - Offline reading and language learning app"
 publish_to: 'none'
-version: 1.2.1+10
+version: 1.2.2+11
 
 environment:
   sdk: ^3.13.3

@@ -367,13 +367,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         pos.maxScrollExtent * idx / total);
   }
 
-  /// 朗读当前句
+  /// 朗读当前句（朗读与屏幕上展示的内容一致的文本）
   Future<void> _playIntensiveSentence() async {
     if (!_intensiveMode || _intensiveSentences.isEmpty) return;
     setState(() => _intensivePlaying = true);
     try {
-      final s = _intensiveSentences[_intensiveSentenceIndex
-          .clamp(0, _intensiveSentences.length - 1)];
+      // 朗读屏幕上所展示的文本（学习语言），与阅读器双语展示逻辑一致
+      final audioText = _intensiveDisplayText();
+      final audioLang = _intensiveAudioLanguage();
       // iOS: 显式配置音频会话, 确保静音开关拨到静音也能从扬声器发声
       if (Platform.isIOS) {
         await _tts.setSharedInstance(true);
@@ -384,13 +385,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           IosTextToSpeechAudioMode.voicePrompt,
         );
       }
-      await _tts.setLanguage(_bookLanguage == 'zh' ? 'zh-CN' : 'en-US');
+      await _tts.setLanguage(_iosTtsLang(audioLang));
       await _tts.setSpeechRate(_intensiveRate);
       await _tts.setVolume(1.0);
       // 停止上次播放时压制其 completion 回调，避免误触发连播
       _suppressIntensiveCompletion = true;
       await _tts.stop();
-      await _tts.speak(s.text);
+      await _tts.speak(audioText);
       // 完成后的连播由 _onIntensiveComplete 处理；这里不置 false，
       // 以免与 completion handler 的 setState 竞争。
     } catch (e) {
@@ -398,6 +399,31 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       setState(() => _intensivePlaying = false);
     }
   }
+
+  /// 朗读所用语言：
+  /// - 书籍非母语（正常阅读）→ 朗读书本原文（即学习语言），语言 = 书语
+  /// - 书籍为母语（倒转 shouldSwap）→ 朗读学习语言译文，语言 = 学习语言
+  String _intensiveAudioLanguage() {
+    final bilingualEnabled = ref.read(bilingualEnabledProvider);
+    final nativeLang = ref.read(nativeLanguageProvider);
+    final shouldSwap = bilingualEnabled && _bookLanguage == nativeLang;
+    final s = _intensiveSentences[_intensiveSentenceIndex
+        .clamp(0, _intensiveSentences.length - 1)];
+    final t = _translationMap[s.charOffset] ?? '';
+    final hasT = t.isNotEmpty;
+    if (shouldSwap && hasT) {
+      return ref.read(bilingualLearningLanguageProvider);
+    }
+    return _bookLanguage;
+  }
+
+  /// 书语言代码 → TTS 语言代码（iOS/Android 需要 'zh-CN' 等地区后缀）
+  String _iosTtsLang(String lang) {
+    if (lang == 'zh') return 'zh-CN';
+    if (lang == 'en') return 'en-US';
+    return lang;
+  }
+
 
   /// 当前句应展示的文本（与阅读器双语展示逻辑一致）
   String _intensiveDisplayText() {
@@ -436,7 +462,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   void _goToNextIntensiveSentence() {
     if (_intensiveSentenceIndex >= _intensiveSentences.length - 1) {
-      setState(() => _intensivePlaying = false);
+      // 已到当前句子列表末尾 → 自动加载下一章并继续朗读
+      _loadNextChapterIntensive();
       return;
     }
     _suppressIntensiveCompletion = true;
@@ -449,6 +476,36 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       if (!mounted) return;
       _alignIntensiveSentence();
       _playIntensiveSentence();
+    });
+  }
+
+  /// 精读读到当前加载内容末尾：追加下一章内容并继续朗读
+  void _loadNextChapterIntensive() {
+    final next = _loadedUpToChapter + 1;
+    if (next >= _chapterCount) {
+      // 全书已读完
+      setState(() => _intensivePlaying = false);
+      return;
+    }
+    final prevLen = _intensiveSentences.length; // 新增章节句子起始索引
+    _suppressIntensiveCompletion = true;
+    _tts.stop();
+    _loadChapter(next, direction: LoadDirection.append);
+    // 等待下一章加载完成（setState + post-frame）后再扩展句子列表
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_loadedUpToChapter < next) return; // 未加载成功
+      _buildIntensiveSentences();
+      if (_intensiveSentences.length > prevLen) {
+        setState(() {
+          _intensiveSentenceIndex = prevLen;
+          _intensivePlaying = true;
+        });
+        _alignIntensiveSentence();
+        _playIntensiveSentence();
+      } else {
+        setState(() => _intensivePlaying = false);
+      }
     });
   }
 

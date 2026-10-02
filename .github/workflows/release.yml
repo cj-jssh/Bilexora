@@ -778,6 +778,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 需要足够的 git 历史来区分「上一个版本tag → 当前tag」之间的提交, 用于生成按类型分类的变更说明
+          fetch-depth: 0
 
       - name: Resolve release tag from pubspec.yaml
         id: version
@@ -894,6 +897,7 @@ jobs:
       - name: Generate release notes
         shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
 
           if [ -f "release/Bilexora_${TAG}.apk" ]; then
@@ -904,6 +908,54 @@ jobs:
             ANDROID_LINE="(Android APK 本轮未构建)"
           fi
 
+          # ────────────────────────────────────────────────
+          # 收集自上一个版本 tag 以来的提交, 按 conventional commit 类型
+          # (feat / fix / perf / refactor / 其他) 分类生成变更日志。
+          # ────────────────────────────────────────────────
+          PREV_TAG=""
+          for t in $(git tag --sort=-creatordate); do
+            if [ "$t" != "$TAG" ]; then
+              PREV_TAG="$t"
+              break
+            fi
+          done
+
+          # 找不到可对比的上一 tag 时: 从仓库最早一次提交开始
+          BASE_REF="${PREV_TAG:-$(git rev-list --max-parents=0 HEAD | tail -n1)}"
+
+          # 按类型聚合提交说明
+          CAT_FEAT="$(git log "${BASE_REF}..HEAD" --format='%s' | sed -nE 's/^feat([(-].*)?: *//p' || true)"
+          CAT_FIX="$(git log "${BASE_REF}..HEAD" --format='%s' | sed -nE 's/^fix([(-].*)?: *//p' || true)"
+          CAT_PERF="$(git log "${BASE_REF}..HEAD" --format='%s' | sed -nE 's/^perf([(-].*)?: *//p' || true)"
+          CAT_REFACTOR="$(git log "${BASE_REF}..HEAD" --format='%s' | sed -nE 's/^(refactor|revert)([(-].*)?: *//p' || true)"
+          CAT_OTHER="$(git log "${BASE_REF}..HEAD" --format='%s' | grep -vE '^(feat|fix|perf|refactor|revert|chore|docs|build|ci|style|test|Merge|Bump)([(-].*)?:' || true)"
+
+          # 将某分类内容格式化输出
+          emit() {
+            local head="$1"
+            local body="$2"
+            echo "### ${head}"
+            echo
+            if [ -z "$(grep -v '^$' <<< "$body")" ]; then
+              echo "> 无"
+            else
+              while IFS= read -r c; do
+                [ -n "$c" ] && echo "- ${c}"
+              done <<< "$body"
+            fi
+            echo
+          }
+
+          CHANGELOG="$(mktemp)"
+          emit '✨ 新功能' "$CAT_FEAT" >> "$CHANGELOG"
+          emit '🐛 Bug 修复' "$CAT_FIX" >> "$CHANGELOG"
+          emit '⚡️ 性能优化' "$CAT_PERF" >> "$CHANGELOG"
+          emit '♻️ 重构' "$CAT_REFACTOR" >> "$CHANGELOG"
+          emit '📝 其他变更' "$CAT_OTHER" >> "$CHANGELOG"
+
+          CHANGELOG_CONTENT="$(cat "$CHANGELOG")"
+          rm "$CHANGELOG"
+
           cat > release-notes.md <<EOF
           ## ${TAG}
 
@@ -912,7 +964,14 @@ jobs:
           iOS IPA (未签名, 需自行用 AltStore / Sideloadly 等工具自签安装):
 
           - Bilexora_ios_${TAG}_unsigned.ipa
+
+          ---
+
+          ## 更新日志
+
+          ${CHANGELOG_CONTENT}
           EOF
+
 
       # ------------------------------------------------------------
       # Create application release

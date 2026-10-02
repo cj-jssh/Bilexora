@@ -3,8 +3,10 @@ name: Flutter CI/CD
 on:
   push:
     tags:
-      - "*"
-  # 手动触发入口: 用于调试打包(如 iOS 未签名 IPA), 不必先打 tag。
+      # 语义化版本 tag (v1.2.3), 供直接 push tag 触发构建时使用
+      - "v*"
+  # 手动触发 = 发布入口: 构建产物后读取 pubspec.yaml 的 version,
+  # 用 gh release create 自动创建 v{version} 的 tag 并发布 Release。
   workflow_dispatch:
 
 permissions:
@@ -749,8 +751,9 @@ jobs:
 
   release:
     name: Create Release
-    # 只在推送 tag 时发布; workflow_dispatch 手动触发只跑构建, 不建 Release。
-    if: github.event_name != 'workflow_dispatch'
+    # tag 一律取自 pubspec.yaml 的 version:
+    #   - push v{version} tag 直达: GITHUB_REF_NAME 即该 tag
+    #   - workflow_dispatch 手动发布: 靠本 job 用 gh release create 自动建 tag+Release
     needs:
       - flutter-test
       - flutter-analyze
@@ -764,6 +767,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve release tag from pubspec.yaml
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 手动触发时以 pubspec version 为准;
+          # push tag 触发时直接沿用触发它的 tag (保证 tag 名与产物名一致)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V=$(sed -nE 's/^version:[[:space:]]+([^[:space:]]+).*/\1/p' pubspec.yaml | head -n1)
+            [ -n "$V" ] || { echo "ERROR: 无法读取 pubspec.yaml version"; exit 1; }
+            TAG="v${V%%+*}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
 
       - name: Download Android APK
         # Android job 被 if: false 关闭时该 artifact 不存在, 跳过
@@ -845,7 +865,7 @@ jobs:
         run: |
           set -e
 
-          TAG="${GITHUB_REF_NAME:-manual}"
+          TAG="${{ steps.version.outputs.tag }}"
 
           if [ -f release/app-release.apk ]; then
             mv release/app-release.apk "release/Bilexora_${TAG}.apk"
@@ -863,7 +883,7 @@ jobs:
       - name: Generate release notes
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME:-manual}"
+          TAG="${{ steps.version.outputs.tag }}"
 
           if [ -f "release/Bilexora_${TAG}.apk" ]; then
             ANDROID_LINE="Android APK:
@@ -885,14 +905,31 @@ jobs:
 
       # ------------------------------------------------------------
       # Create application release
+      #
+      # 手动触发时 gh release create 会同时创建对应 tag 并指向当前 HEAD,
+      # 使 tag 名始终等于 pubspec.yaml 的版本号。push-tag 事件时 tag 已存在,
+      # gh release create 直接关联该 tag 发布, 不重复创建。
       # ------------------------------------------------------------
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          body_path: release-notes.md
-          # 用 glob: Android 关闭时只有 IPA 匹配, 重新开启后两个都会匹配。
-          # (不要逐行列出可能不存在的文件, action-gh-release 会因缺文件报错)
-          files: release/Bilexora_*
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 幂等: tag 已存在(来自 push 或手动 job 触发)则直接上传, 否则创建
+          files=""
+          for f in release/Bilexora_*; do
+            [ -f "$f" ] && files="$files $f"
+          done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            for f in $files; do
+              gh release upload "$TAG" "$f" --clobber
+            done
+          else
+            # 参数按需拼接, 避免无文件时报错
+            args=("$TAG" --title "$TAG" --notes-file release-notes.md --target "${GITHUB_SHA}")
+            for f in $files; do args+=("$f"); done
+            gh release create "${args[@]}"
+          fi

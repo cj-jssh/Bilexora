@@ -16,7 +16,19 @@ final todayReadingSecondsProvider = FutureProvider<int>((ref) async {
 });
 
 final readingWordCountProvider = StateProvider<int>((ref) => 0);
-final lookupWordCountProvider = StateProvider<int>((ref) => 0);
+
+// 今日查词次数（持久化统计的真实值）
+final todayLookupCountProvider = FutureProvider<int>((ref) async {
+  return LibraryDatabase().getTodayLookupCount();
+});
+// 累计查词次数（持久化统计的真实值）
+final totalLookupCountProvider = FutureProvider<int>((ref) async {
+  return LibraryDatabase().getTotalLookupCount();
+});
+// 为兼容 reader 中 invalidate 的旧名，保留一个对应今日值的 provider
+final lookupWordCountProvider = FutureProvider<int>((ref) async {
+  return LibraryDatabase().getTodayLookupCount();
+});
 
 final weeklySecondsProvider = FutureProvider<List<int>>((ref) async {
   final db = LibraryDatabase();
@@ -119,7 +131,12 @@ class HomeScreen extends ConsumerWidget {
     final todaySecondsAsync = ref.watch(todayReadingSecondsProvider);
     final dailyGoal = ref.watch(dailyReadingGoalProvider);
     final wordCount = ref.watch(readingWordCountProvider);
-    final lookupCount = ref.watch(lookupWordCountProvider);
+    final todayLookupAsync = ref.watch(todayLookupCountProvider);
+    final totalLookupAsync = ref.watch(totalLookupCountProvider);
+    final todayLookup = todayLookupAsync.when(
+        data: (v) => v, loading: () => 0, error: (_, _) => 0);
+    final totalLookup = totalLookupAsync.when(
+        data: (v) => v, loading: () => 0, error: (_, _) => 0);
     final todayMinutes = todaySecondsAsync.when(data: (s) => (s / 60).round(), loading: () => 0, error: (_, _) => 0);
     final progress = dailyGoal > 0 ? (todayMinutes / dailyGoal).clamp(0.0, 1.0) : 0.0;
 
@@ -150,7 +167,14 @@ class HomeScreen extends ConsumerWidget {
           Expanded(flex: 7, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _StatTile(icon: Icons.auto_stories_outlined, label: '阅读词汇量', value: '$wordCount', unit: '词'),
             const SizedBox(height: 16),
-            _StatTile(icon: Icons.search_outlined, label: '查询单词', value: '$lookupCount', unit: '次'),
+            _StatTile(icon: Icons.search_outlined, label: '今日查词', value: '$todayLookup', unit: '次'),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.only(left: 2),
+              child: Text('累计查词 $totalLookup 次',
+                style: TextStyle(fontSize: 11,
+                  color: Theme.of(context).colorScheme.outline)),
+            ),
           ])),
         ],
       ),

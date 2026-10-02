@@ -1327,6 +1327,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       _lookupWord = word;
       _lookupPanelVisible = true;
     });
+    // 持久化查词统计（每日 + 累计），异步不阻塞 UI
+    final db = LibraryDatabase();
+    db.incrementLookupCount().then((_) {
+      if (mounted) ref.invalidate(lookupWordCountProvider);
+    }).catchError((Object e) {
+      debugPrint('[查词] 统计失败: $e');
+    });
   }
 
   void _dismissLookupPanel() {

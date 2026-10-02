@@ -27,7 +27,7 @@ class LibraryDatabase {
 
     return await openDatabase(
       dbPath,
-      version: 4,
+      version: 5,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -129,6 +129,9 @@ class LibraryDatabase {
         PRIMARY KEY (book_id, language)
       )
     ''');
+
+    // v5: lookup_count 表 - 每日查词统计
+    await _createLookupCountTable(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -162,6 +165,19 @@ class LibraryDatabase {
         )
       ''');
     }
+    if (oldVersion < 5) {
+      await _createLookupCountTable(db);
+    }
+  }
+
+  Future<void> _createLookupCountTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS lookup_count (
+        date TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (date)
+      )
+    ''');
   }
 
   Future<void> _createReadingTimeTable(Database db) async {
@@ -396,6 +412,58 @@ class LibraryDatabase {
       map[row['date'] as String] = (row['total'] as num).toInt();
     }
     return dates.map((d) => map[d] ?? 0).toList();
+  }
+
+  // ========================
+  // Lookup Count (查词统计)
+  // ========================
+
+  /// 确保 lookup_count 表存在（自愈）
+  Future<void> _ensureLookupCountTable() async {
+    final db = await database;
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS lookup_count (
+        date TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (date)
+      )
+    ''');
+  }
+
+  /// 记录一次查词（按日累计），同一词汇重复查询也计入次数
+  Future<void> incrementLookupCount() async {
+    await _ensureLookupCountTable();
+    final db = await database;
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    await db.execute('''
+      INSERT INTO lookup_count (date, count)
+      VALUES (?, 1)
+      ON CONFLICT(date) DO UPDATE SET
+        count = count + 1
+    ''', [today]);
+  }
+
+  /// 获取今日查词次数
+  Future<int> getTodayLookupCount() async {
+    await _ensureLookupCountTable();
+    final db = await database;
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    final result = await db.rawQuery('''
+      SELECT COALESCE(SUM(count), 0) AS total
+      FROM lookup_count WHERE date = ?
+    ''', [today]);
+    return (result.first['total'] as num).toInt();
+  }
+
+  /// 获取累计查词次数（全部历史）
+  Future<int> getTotalLookupCount() async {
+    await _ensureLookupCountTable();
+    final db = await database;
+    final result = await db.rawQuery('''
+      SELECT COALESCE(SUM(count), 0) AS total
+      FROM lookup_count
+    ''');
+    return (result.first['total'] as num).toInt();
   }
 
   // ========================

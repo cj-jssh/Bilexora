@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "*"
+  # 手动触发入口: 用于调试打包(如 iOS 未签名 IPA), 不必先打 tag。
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -393,9 +395,20 @@ jobs:
   # ==============================================================
 
   flutter-build-ios:
-    name: Build iOS
-    if: ${{ false }}
+    name: Build iOS (unsigned IPA)
     runs-on: macos-latest
+
+    # CMake 4.x 已不再兼容第三方的 cmake_minimum_required(<3.5)
+    # (vendored marian-dev / ssplit-cpp 仍写 3.5.1)。
+    # env.CMAKE_POLICY_VERSION_MINIMUM 会被 xcodebuild 内的所有 cmake
+    # configure 继承 (podspec 脚本、pcre2 ExternalProject)。
+    # 但 ExternalProject 的命令行参数会覆盖环境变量, 所以下面还在
+    # FindPCRE2.cmake 里显式加了 -DCMAKE_POLICY_VERSION_MINIMUM=3.5。
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      CODE_SIGNING_ALLOWED: "NO"
+      CODE_SIGNING_REQUIRED: "NO"
+      EXPANDED_CODE_SIGN_IDENTITY: ""
 
     steps:
       - name: Checkout
@@ -413,76 +426,253 @@ jobs:
       - name: Install native dependencies
         run: |
           brew install cmake ninja
+          cmake --version
+
+      # ------------------------------------------------------------
+      # 第三方依赖补丁 (原先 iOS job 里做过、后又被删掉的那部分)
+      #
+      # 每个补丁都带 grep 后置校验, 避免上游变更后静默失效。
+      # ------------------------------------------------------------
+
+      - name: Patch vendored dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          R="plugins/bergamot_translator/third_party/bergamot-translator"
+
+          # (1) Marian: 冷克隆的 submodule 没有 .git/logs/HEAD,
+          #     而 marian CMake 的 add_custom_command 把 ${MARIAN_GIT_DIR}/logs/HEAD
+          #     当成 DEPENDS, 于是 Unix Makefiles 报
+          #     “No rule to make target .../logs/HEAD”。
+          #     直接把 DEPENDS 行去掉, marian_version 仍会生成 git_revision.h。
+          M="$R/3rd_party/marian-dev/src/CMakeLists.txt"
+          if grep -q 'DEPENDS ${MARIAN_GIT_DIR}/logs/HEAD' "$M"; then
+            sed -i '' '/DEPENDS ${MARIAN_GIT_DIR}\/logs\/HEAD/d' "$M"
+          fi
+          ! grep -q 'DEPENDS ${MARIAN_GIT_DIR}/logs/HEAD' "$M"
+
+          # (2) sentencepiece: 新 Clang 拒绝把 static_cast 放进 constexpr 初始化。
+          SP="$R/3rd_party/marian-dev/src/3rd_party/sentencepiece/src/trainer_interface.cc"
+          sed -i '' 's/constexpr unicode_script::ScriptType kAnyType =/const unicode_script::ScriptType kAnyType =/' "$SP"
+          grep -q 'const unicode_script::ScriptType kAnyType =' "$SP"
+
+          # (3) ssplit/PCRE2: iOS 无系统 libpcre2-8, 走内置 pcre2;
+          #     内置 pcre2 是 ExternalProject 独立 configure, 必须显式关掉
+          #     pcre2grep / JIT, 否则 iOS 交叉编译时 pcre2grep 链接
+          #     ___clear_cache (JIT 符号) 失败, 整个 pcre2 目标失败。
+          F="$R/3rd_party/ssplit-cpp/cmake/FindPCRE2.cmake"
+          python3 - "$F" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          # iOS/WASM 关掉 JIT (原文件只判断 em++, 这里补 IOS)
+          text = text.replace(
+              'if(CMAKE_CXX_COMPILER MATCHES "/em\\\\+\\\\+(-[a-zA-Z0-9.])?$")',
+              'if(CMAKE_CXX_COMPILER MATCHES "/em\\\\+\\\\+(-[a-zA-Z0-9.])?$" OR IOS)',
+          )
+
+          opts = [
+              '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
+              '-DPCRE2_BUILD_PCRE2GREP=OFF',
+              '-DPCRE2_BUILD_TESTS=OFF',
+              '-DPCRE2_SUPPORT_LIBZ=OFF',
+              '-DPCRE2_SUPPORT_LIBBZ2=OFF',
+          ]
+
+          lines = text.splitlines()
+          out, inserted = [], False
+          for line in lines:
+              if line.strip() == '-DCMAKE_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}':
+                  out.append(line)
+                  out.extend(('    ' + o) for o in opts)
+                  inserted = True
+              else:
+                  out.append(line)
+
+          if not inserted:
+              raise SystemExit('FindPCRE2.cmake: PCRE2_CONFIGURE_OPTIONS anchor not found')
+
+          path.write_text('\n'.join(out) + '\n')
+          print('patched:', path)
+          PY
+          grep -q 'PCRE2_BUILD_PCRE2GREP=OFF' "$F"
+          grep -q 'OR IOS' "$F"
+
+          echo '=== marian DEPENDS 检查 ==='
+          grep -n 'logs/HEAD' "$M" || echo 'no logs/HEAD dependency (ok)'
+          echo '=== FindPCRE2 检查 ==='
+          grep -n 'PCRE2_BUILD_PCRE2GREP\|OR IOS\|PCRE2_SUPPORT_JIT' "$F" | head
 
       - name: Flutter pub get
         run: flutter pub get
 
       # ------------------------------------------------------------
-      # Remove DEVELOPMENT_TEAM from project settings
+      # 清理签名配置
+      #
+      # 不能把 CODE_SIGN_STYLE 改成 Manual: 无 provisioning profile 时
+      # xcodebuild 会直接拒绝, 只在 Runner.app 里留下空壳(520B 空 IPA)。
+      # 只删 DEVELOPMENT_TEAM / 清空 identity, 然后构建时用
+      # CODE_SIGNING_ALLOWED=NO 真正禁用签名。
       # ------------------------------------------------------------
 
-      - name: Remove DEVELOPMENT_TEAM
+      - name: Disable code signing in project
         shell: bash
         run: |
-          find ios -type f \
-            \( -name "*.pbxproj" -o -name "*.xcconfig" \) \
-            -print0 |
-          xargs -0 sed -i '' '/DEVELOPMENT_TEAM/d' || true
+          set -euo pipefail
+
+          PBX=ios/Runner.xcodeproj/project.pbxproj
+
+          sed -i '' '/DEVELOPMENT_TEAM/d' "$PBX"
+          perl -i -pe 's/CODE_SIGN_IDENTITY = \".*\"/CODE_SIGN_IDENTITY = \"\";/g' "$PBX"
+          perl -i -pe 's/\"CODE_SIGN_IDENTITY\[[^\"]*\]\" = \".*\"/\"CODE_SIGN_IDENTITY\" = \"\";/g' "$PBX"
+
+          echo '=== 签名相关字段 ==='
+          grep -nE 'CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM|CODE_SIGNING_' "$PBX" || true
+          ! grep -q 'DEVELOPMENT_TEAM' "$PBX"
 
       # ------------------------------------------------------------
-      # Flutter iOS configuration
+      # 生成原生工程 (pod install)
+      #
+      # flutter build ios 在没有 DEVELOPMENT_TEAM 时会被 validator 硬编码拒绝
+      # (flutter_tools: mac.dart _missingDevelopmentTeam),
+      # 所以只用 --config-only 生成工程 + Runner.xcworkspace,
+      # 真正的编译交给下面的 xcodebuild。
       # ------------------------------------------------------------
 
-      - name: Flutter iOS config
-        run: |
-          flutter build ios \
-            --release \
-            --config-only \
-            --no-codesign || true
-
-      # ------------------------------------------------------------
-      # Xcode archive without signing
-      # ------------------------------------------------------------
-
-      - name: Build unsigned iOS archive
+      - name: Flutter iOS config (pod install)
         shell: bash
         run: |
+          set -uo pipefail
+
+          # --config-only 只生成原生工程 + 跑 pod install, 不做真正的编译。
+          # 这里不因它的退出码直接失败, 而是用产物存在性做硬校验。
+          set +e
+          flutter build ios --release --config-only --no-codesign 2>&1 | tee /tmp/ios_config.log
+          CFG=${PIPESTATUS[0]}
           set -e
+          echo "=== flutter config-only exit code: $CFG ==="
+
+          test -f ios/Runner.xcworkspace/contents.xcworkspacedata \
+            || { echo 'ERROR: Runner.xcworkspace 未生成'; exit 1; }
+          test -f ios/Pods/Manifest.lock \
+            || { echo 'ERROR: pod install 未完成 (无 ios/Pods/Manifest.lock)'; exit 1; }
+          test -f ios/Flutter/Generated.xcconfig \
+            || { echo 'ERROR: ios/Flutter/Generated.xcconfig 未生成'; exit 1; }
+
+          echo '--- ios/Flutter/Generated.xcconfig ---'
+          cat ios/Flutter/Generated.xcconfig
+
+      # ------------------------------------------------------------
+      # 未签名构建
+      #
+      # 用 `build` 而不是 `archive`: archive 会走 Xcode 的归档/导出校验,
+      # 在无签名环境下容易在最后一步失败; 我们只需要完整可安装的
+      # Runner.app, 自己组装 Payload 打 IPA 即可。
+      # 注意: xcodebuild 的退出码必须真正冒泡上来 (以前用 `|| true`
+      # 把失败吞掉, 于是 mkdir 出来的空 Runner.app 被 zip 成 520B 空 IPA)。
+      # ------------------------------------------------------------
+
+      - name: Build iOS (unsigned)
+        shell: bash
+        run: |
+          set -uo pipefail
 
           cd ios
 
-          xcodebuild \
-            -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -sdk iphoneos \
-            -archivePath "$PWD/build/Runner.xcarchive" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            archive
+          run_xcodebuild() {
+            xcodebuild \
+              -workspace Runner.xcworkspace \
+              -scheme Runner \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath "$PWD/build/ios_dd" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              "$@" \
+              build 2>&1 | tee /tmp/xcodebuild.log
+          }
+
+          set +e
+          # 首选显式 destination (Xcode 26 推荐写法)
+          run_xcodebuild -destination 'generic/platform=iOS'
+          XC=${PIPESTATUS[0]}
+
+          if [ "$XC" -ne 0 ] && grep -q "Unable to find a destination" /tmp/xcodebuild.log; then
+            echo '--- destination 不被识别, 回退到不带 -destination ---'
+            run_xcodebuild
+            XC=${PIPESTATUS[0]}
+          fi
+          set -e
+
+          echo "=== xcodebuild exit code: $XC ==="
+          grep -nE 'error:|BUILD FAILED|Undefined symbols|make.*Error' /tmp/xcodebuild.log | tail -40 || true
+
+          if [ "$XC" -ne 0 ]; then
+            echo 'ERROR: xcodebuild 失败, 请看上面的 error 行'
+            exit "$XC"
+          fi
+
+          APP="$PWD/build/ios_dd/Build/Products/Release-iphoneos/Runner.app"
+          echo "=== Runner.app: $APP ==="
+          du -sh "$APP"
+          ls -la "$APP/Frameworks" | head -20
+
+      # ------------------------------------------------------------
+      # 打包 + 校验
+      #
+      # 关键: 校验主二进制存在且是 arm64 Mach-O。
+      # 之前 CI 只做了 mkdir Runner.app, 构建失败也照样 zip,
+      # 所以“成功”却产出 520B 空 IPA —— 这里必须硬失败。
+      # ------------------------------------------------------------
 
       - name: Package unsigned IPA
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          APP="ios/build/ios_dd/Build/Products/Release-iphoneos/Runner.app"
+
+          test -d "$APP"
+          test -f "$APP/Runner"
+          test -f "$APP/Frameworks/App.framework/App"
+          test -f "$APP/Frameworks/Flutter.framework/Flutter"
+
+          echo "=== Runner.app size: $(du -sh "$APP" | cut -f1) ==="
+          file "$APP/Runner"
+
+          rm -rf ios/Payload
+          mkdir -p ios/Payload
+          cp -R "$APP" ios/Payload/Runner.app
+
+          # 未签名 IPA: 用 ad-hoc(-) 重签内部 framework,
+          # 方便后续用 AltStore / Sideloadly 之类工具自签安装。
+          find ios/Payload/Runner.app/Frameworks -type d -name '*.framework' \
+            -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \; || true
 
           cd ios
+          rm -f Bilexora_ios_unsigned.ipa
+          zip -qry Bilexora_ios_unsigned.ipa Payload
 
-          rm -rf Payload
-          mkdir -p Payload
-
-          cp -R \
-            build/Runner.xcarchive/Products/Applications/Runner.app \
-            Payload/Runner.app
-
-          zip -r unsigned.ipa Payload
+          # IPA 体积硬校验: 完整 App.framework + Flutter.framework 不可能只有几 KB。
+          SIZE=$(stat -f%z Bilexora_ios_unsigned.ipa)
+          echo "IPA size: ${SIZE} bytes"
+          if [ "$SIZE" -lt 1048576 ]; then
+            echo 'ERROR: IPA 过小, 疑似空壳/构建失败产物'
+            exit 1
+          fi
+          unzip -l Bilexora_ios_unsigned.ipa | tail -5
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: ios-unsigned-ipa
-          path: ios/unsigned.ipa
+          path: ios/Bilexora_ios_unsigned.ipa
+          if-no-files-found: error
 
 
   # ==============================================================
@@ -491,10 +681,13 @@ jobs:
 
   release:
     name: Create Release
+    # 只在推送 tag 时发布; workflow_dispatch 手动触发只跑构建, 不建 Release。
+    if: github.event_name != 'workflow_dispatch'
     needs:
       - flutter-test
       - flutter-analyze
       - flutter-build-android
+      - flutter-build-ios
     runs-on: ubuntu-latest
 
     permissions:
@@ -509,6 +702,12 @@ jobs:
         with:
           name: android-apk
           path: release
+
+      - name: Download unsigned iOS IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: ios-release
 
       - name: Download Bergamot artifact
         uses: actions/download-artifact@v4
@@ -568,17 +767,19 @@ jobs:
             --clobber
 
       # ------------------------------------------------------------
-      # Rename APK
+      # Rename artifacts with the tag
       # ------------------------------------------------------------
 
-      - name: Rename APK
+      - name: Rename artifacts
         shell: bash
         run: |
           set -e
 
-          mv \
-            release/app-release.apk \
-            release/app-${GITHUB_REF_NAME}.apk
+          TAG="${GITHUB_REF_NAME:-manual}"
+
+          mv release/app-release.apk "release/Bilexora_${TAG}.apk"
+          mv ios-release/Bilexora_ios_unsigned.ipa "release/Bilexora_ios_${TAG}_unsigned.ipa"
+          ls -lh release
 
       # ------------------------------------------------------------
       # Generate release notes
@@ -587,12 +788,18 @@ jobs:
       - name: Generate release notes
         shell: bash
         run: |
+          TAG="${GITHUB_REF_NAME:-manual}"
+
           cat > release-notes.md <<EOF
-          ## ${GITHUB_REF_NAME}
+          ## ${TAG}
 
           Android APK:
 
-          - app-${GITHUB_REF_NAME}.apk
+          - Bilexora_${TAG}.apk
+
+          iOS IPA (未签名, 需自行用 AltStore / Sideloadly 等工具自签安装):
+
+          - Bilexora_ios_${TAG}_unsigned.ipa
           EOF
 
       # ------------------------------------------------------------
@@ -606,4 +813,5 @@ jobs:
           name: ${{ github.ref_name }}
           body_path: release-notes.md
           files: |
-            release/app-${{ github.ref_name }}.apk
+            release/Bilexora_${{ github.ref_name }}.apk
+            release/Bilexora_ios_${{ github.ref_name }}_unsigned.ipa

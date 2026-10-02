@@ -425,6 +425,17 @@ jobs:
           channel: stable
           cache: true
 
+      # 缓存 CocoaPods spec 仓库, 避免每次 pod install 都重新拉取 CDN,
+      # 只缓存纯下载内容, 不含原生编译产物, 无正确性风险。
+      - name: Cache CocoaPods specs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cocoapods
+          key: cocoapods-specs-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            cocoapods-specs-
+
       - name: Install native dependencies
         run: |
           brew install cmake ninja

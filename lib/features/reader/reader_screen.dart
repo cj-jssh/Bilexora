@@ -57,6 +57,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   // 预加载章节数量（可配置，默认 5）
   int _preloadCount = 5;
 
+  // 章节解码缓存：后台/空闲时预解码, 滚动到边缘时命中缓存则零解码,
+  // 避免在滚动瞬间同步阻塞主 isolate 解码整章造成卡顿。
+  final Map<int, Chapter> _chapterCache = {};
+  final List<int> _prefetchQueue = []; // 待解码章节队列(先靠近先解)
+  bool _prefetchActive = false;
+  Timer? _prefetchTimer;
+
   // 加载方向锁，防止重复触发
   bool _isAppending = false;
   bool _isPrepending = false;
@@ -107,6 +114,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _saveTimer?.cancel();
     _controlHideTimer?.cancel();
     _readingTimer?.cancel();
+    _prefetchTimer?.cancel();
     _saveReadingTime();
     _saveReaderSettings();
     try { _invalidateHomeProviders(); } catch (_) {}
@@ -261,11 +269,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
     final clamped = index.clamp(0, _chapterCount - 1);
 
-    final chapter = reader.readChapter(clamped);
+    // 优先从预取缓存取章(零解码), 未命中才同步解码
+    var chapter = _chapterCache.remove(clamped);
+    chapter ??= reader.readChapter(clamped);
     if (chapter == null) {
       _releaseLock(direction);
       return;
     }
+
+    // 当前章节变动后, 后台预解码四周章节, 供后续滚动直接命中缓存
+    _prefetchChapters(clamped);
 
     // 保存 prepend 前的滚动位置，用于 setState 后补偿
     final prePrependScrollOffset = direction == LoadDirection.prepend && _scrollController.hasClients
@@ -324,6 +337,51 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
 
     _updateLastReadAt().then((_) { if (mounted) _invalidateHomeProviders(); });
+  }
+
+  /// 预解码 [centerIndex] 四周的章节到缓存。解码是同步 CPU 操作,
+  /// 逐章放到定时器回调里分段执行, 让每帧之间有间隔, 避免一次性阻塞主线程。
+  /// 已缓存/正在排程的章节跳过, 保证不重复。
+  void _prefetchChapters(int centerIndex) {
+    final reader = _reader;
+    if (reader == null) return;
+
+    // 由近及远收集待解章节
+    final targets = <int>[];
+    for (int i = 1; i <= _preloadCount; i++) {
+      final next = centerIndex + i;
+      final prev = centerIndex - i;
+      if (next < _chapterCount && !_chapterCache.containsKey(next)) {
+        targets.add(next);
+      }
+      if (prev >= 0 && !_chapterCache.containsKey(prev)) {
+        targets.add(prev);
+      }
+    }
+    if (targets.isEmpty) return;
+
+    _prefetchQueue.addAll(targets);
+    _schedulePrefetch();
+  }
+
+  void _schedulePrefetch() {
+    if (_prefetchActive || _prefetchQueue.isEmpty) return;
+    _prefetchActive = true;
+    _prefetchTimer?.cancel();
+    // 分段执行: 每帧只解一章, 其余等下一帧, 避免长任务卡住滚动
+    _prefetchTimer = Timer(const Duration(milliseconds: 16), () {
+      final reader = _reader;
+      final next = _prefetchQueue.removeAt(0);
+      if (reader != null && next >= 0 && next < _chapterCount) {
+        if (!_chapterCache.containsKey(next)) {
+          final ch = reader.readChapter(next);
+          if (ch != null) _chapterCache[next] = ch;
+        }
+      }
+      _prefetchActive = false;
+      // 继续处理队列余下章节
+      if (_prefetchQueue.isNotEmpty) _schedulePrefetch();
+    });
   }
 
   /// 惰性计算 content.dat 每章句数，缓存结果避免滚动时反复解析全书
@@ -1148,6 +1206,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// getPositionForPoint 吸附到最近字符，然后扩展为完整单词。
   /// 直接使用 _extractWordAtOffset 返回的 start/end，
   /// 避免 indexOf 匹配到重复词的错误实例。
+  ///
+  /// iOS/Impeller 下 getPositionForPoint 对高行高、多行文本可能吸附到
+  /// 相邻行/相邻词，导致“点到 A 词却查 B 词”。这里用 getBoxesForSelection
+  /// 反向校验：取候选字符的包围盒，只有当点击点确实落在该字符的水平区间内
+  /// 才接受；否则跳过当前 RenderEditable 继续尝试下一个（双语模式下
+  /// 同一屏有原文 + 译文多个文本节点）。
   /// 返回 (fullText, word, start, end) 或 null。
   ({String text, String word, int start, int end})? _extractWordAtPoint(
       Offset globalPos) {
@@ -1157,26 +1221,45 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final local = box.globalToLocal(globalPos);
     if (!(box.hitTest(result, position: local))) return null;
 
-    // 先尝试找 RenderEditable
+    // 遍历所有命中的 RenderEditable（双语模式下可能多个文本节点叠加）
     for (final entry in result.path) {
-      if (entry.target is RenderEditable) {
-        final target = entry.target as RenderEditable;
-        final textEv = target.text;
-        if (textEv == null) continue;
-        final text = textEv.toPlainText();
-        if (text.isEmpty) continue;
-        try {
-          final editableLocal = target.globalToLocal(globalPos);
-          final textOffset = target.getPositionForPoint(editableLocal);
-          final offset = textOffset.offset;
-          if (offset < 0 || offset >= text.length) continue;
-          final result_ = _extractWordAtOffset(text, offset);
-          if (result_ == null || result_.word.length < 2) continue;
-          return (text: text, word: result_.word,
-              start: result_.start, end: result_.end);
-        } catch (_) {
-          continue;
+      if (entry.target is! RenderEditable) continue;
+      final target = entry.target as RenderEditable;
+      final textEv = target.text;
+      if (textEv == null) continue;
+      final text = textEv.toPlainText();
+      if (text.isEmpty) continue;
+      try {
+        final editableLocal = target.globalToLocal(globalPos);
+        final offset = target.getPositionForPoint(editableLocal).offset;
+        if (offset < 0 || offset >= text.length) continue;
+
+        // 用字符包围盒反向校验, 纠正 iOS 吸附偏差
+        final boxes = target.getBoxesForSelection(
+          TextSelection(baseOffset: offset, extentOffset: offset + 1),
+        );
+        bool inside = false;
+        for (final b in boxes) {
+          // 用字符中心点比较, 避免只命中文字顶部/底部的空白区
+          final charBox = b.toRect();
+          final yMin = charBox.top - 4.0;
+          final yMax = charBox.bottom + 4.0;
+          if (editableLocal.dx >= charBox.left - 2.0 &&
+              editableLocal.dx <= charBox.right + 2.0 &&
+              editableLocal.dy >= yMin &&
+              editableLocal.dy <= yMax) {
+            inside = true;
+            break;
+          }
         }
+        if (!inside) continue; // 点在其他词/其他行, 试下一个文本节点
+
+        final result_ = _extractWordAtOffset(text, offset);
+        if (result_ == null || result_.word.length < 2) continue;
+        return (text: text, word: result_.word,
+            start: result_.start, end: result_.end);
+      } catch (_) {
+        continue;
       }
     }
     return null;

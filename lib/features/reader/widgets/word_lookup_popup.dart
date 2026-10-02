@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -123,8 +124,20 @@ class _WordLookupPopupContentState extends State<WordLookupPopupContent> {
     if (_isSpeaking) return;
     setState(() => _isSpeaking = true);
     try {
+      // iOS: 显式配置音频会话, 确保即使静音开关被拨到静音也能从扬声器发声,
+      // 并等待本次朗读真正完成后才恢复按钮状态, 避免连续点击重复触发。
+      if (Platform.isIOS) {
+        await _tts.setSharedInstance(true);
+        await _tts.awaitSpeakCompletion(true);
+        await _tts.setIosAudioCategory(
+          IosTextToSpeechAudioCategory.playback,
+          const [IosTextToSpeechAudioCategoryOptions.defaultToSpeaker],
+          IosTextToSpeechAudioMode.voicePrompt,
+        );
+      }
       await _tts.setLanguage('en-US');
       await _tts.setSpeechRate(0.4);
+      await _tts.setVolume(1.0);
       await _tts.speak(widget.word);
     } catch (e) {
       if (mounted) {

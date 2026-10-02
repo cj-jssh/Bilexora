@@ -77,8 +77,12 @@ jobs:
         run: flutter analyze lib test --no-fatal-infos --fatal-warnings
 
 
+  # 暂时关闭: 本轮只调试 iOS 未签名 IPA。
+  # 用 job 级 if: false 而不是删除/注释整段, 保留全部构建逻辑,
+  # 恢复时只需移除下面这行。
   flutter-build-android:
     name: Build Android
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:
@@ -457,7 +461,49 @@ jobs:
           sed -i '' 's/constexpr unicode_script::ScriptType kAnyType =/const unicode_script::ScriptType kAnyType =/' "$SP"
           grep -q 'const unicode_script::ScriptType kAnyType =' "$SP"
 
-          # (3) ssplit/PCRE2: iOS 无系统 libpcre2-8, 走内置 pcre2;
+          # (3) zlib (marian-dev 内置 copy): 它把 OS_CODE 写死在 `MACOS || TARGET_OS_MAC`
+          #     分支里, 而现代 Apple SDK 会通过系统头暴露 TARGET_OS_MAC, 于是
+          #     走进为 Classic Mac OS 准备的旧路径, 把 fdopen 定义成 NULL。
+          #     再往下 zutil.c 会 #include <stdio.h>, 而 _stdio.h 里有
+          #         FILE *fdopen(int, const char *);
+          #     被宏替换成 `FILE *NULL(int, const char *);` ->
+          #         error: expected identifier or '('
+          #     修法: 旧路径仅在非 Apple 平台生效(Apple 由下面的 __APPLE__ -> OS_CODE 19
+          #     分支处理), 同时避免 OS_CODE 被重复定义。
+          ZU="$R/3rd_party/marian-dev/src/3rd_party/zlib/zutil.h"
+          sed -i '' 's/^#if defined(MACOS) || defined(TARGET_OS_MAC)$/#if defined(MACOS) \&\& !defined(__APPLE__)/' "$ZU"
+          grep -q '^#if defined(MACOS) && !defined(__APPLE__)$' "$ZU"
+          ! grep -q 'defined(TARGET_OS_MAC)' "$ZU"
+
+          # (4) zstr/strict_fstream.hpp: 其 strerror_r 分支用 `... || __APPLE__) && !_GNU_SOURCE`
+          #     判断 XSI 版原型, 但 iOS SDK 里 _GNU_SOURCE 可能被定义, 于是又落回
+          #     GNU 版 strerror_r 调用, 与 XSI 原型不匹配。去掉 !_GNU_SOURCE 条件。
+          SF="$R/3rd_party/marian-dev/src/3rd_party/zstr/strict_fstream.hpp"
+          sed -i '' 's/ || __APPLE__) && ! _GNU_SOURCE$/ || __APPLE__)/' "$SF"
+          ! grep -q '__APPLE__) && ! _GNU_SOURCE' "$SF"
+
+          # (5) marian-dev/src/microsoft/quicksand.h 用了 uint8_t 等类型但未包含
+          #     <cstdint>(libc++ 下不再间接引入)。
+          QS="$R/3rd_party/marian-dev/src/microsoft/quicksand.h"
+          if ! grep -q '#include <cstdint>' "$QS"; then
+            python3 - "$QS" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          lines = path.read_text().splitlines()
+          idx = next(
+              (i for i, line in enumerate(lines) if line.strip() == '#pragma once'),
+              0,
+          )
+          lines.insert(idx + 1, '#include <cstdint>')
+          path.write_text('\n'.join(lines) + '\n')
+          print('patched:', path)
+          PY
+          fi
+          grep -q '#include <cstdint>' "$QS"
+
+          # (6) ssplit/PCRE2: iOS 无系统 libpcre2-8, 走内置 pcre2;
           #     内置 pcre2 是 ExternalProject 独立 configure, 必须显式关掉
           #     pcre2grep / JIT, 否则 iOS 交叉编译时 pcre2grep 链接
           #     ___clear_cache (JIT 符号) 失败, 整个 pcre2 目标失败。
@@ -469,11 +515,24 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text()
 
-          # iOS/WASM 关掉 JIT (原文件只判断 em++, 这里补 IOS)
-          text = text.replace(
-              'if(CMAKE_CXX_COMPILER MATCHES "/em\\\\+\\\\+(-[a-zA-Z0-9.])?$")',
-              'if(CMAKE_CXX_COMPILER MATCHES "/em\\\\+\\\\+(-[a-zA-Z0-9.])?$" OR IOS)',
+          # PCRE2 JIT 在 iOS 上不可用, 且 pcre2grep 链接 JIT 符号会失败。
+          # 上游只在 em++ (WASM) 时关 JIT, 这里把 iOS 也纳入。
+          # 注意: 不要用含有 \\ 转义的锚点字符串 —— run 块的 heredoc 会再吃一层
+          # 反斜杠, 导致文本匹配静默失败。这里改用不带反斜杠的 else 分支做锚点。
+          old = '  else()\n    set(PCRE2_JIT_OPTION  "-DPCRE2_SUPPORT_JIT=ON")\n'
+          new = (
+              '  else()\n'
+              '    if(IOS)\n'
+              '      set(PCRE2_JIT_OPTION  "-DPCRE2_SUPPORT_JIT=OFF")\n'
+              '    else()\n'
+              '      set(PCRE2_JIT_OPTION  "-DPCRE2_SUPPORT_JIT=ON")\n'
+              '    endif()\n'
           )
+
+          if 'if(IOS)' not in text:
+              if old not in text:
+                  raise SystemExit('FindPCRE2.cmake: JIT else-branch anchor not found')
+              text = text.replace(old, new)
 
           opts = [
               '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
@@ -500,7 +559,7 @@ jobs:
           print('patched:', path)
           PY
           grep -q 'PCRE2_BUILD_PCRE2GREP=OFF' "$F"
-          grep -q 'OR IOS' "$F"
+          grep -q 'if(IOS)' "$F"
 
           echo '=== marian DEPENDS 检查 ==='
           grep -n 'logs/HEAD' "$M" || echo 'no logs/HEAD dependency (ok)'
@@ -695,6 +754,7 @@ jobs:
   release:
     name: Create Release
     # 只在推送 tag 时发布; workflow_dispatch 手动触发只跑构建, 不建 Release。
+    # 注: Android job 当前已用 if: false 关闭, 下载 APK 的步骤会自动跳过。
     if: github.event_name != 'workflow_dispatch'
     needs:
       - flutter-test
@@ -711,6 +771,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download Android APK
+        # Android job 被 if: false 关闭时该 artifact 不存在, 跳过
+        if: needs.flutter-build-android.result == 'success'
         uses: actions/download-artifact@v4
         with:
           name: android-apk
@@ -790,7 +852,12 @@ jobs:
 
           TAG="${GITHUB_REF_NAME:-manual}"
 
-          mv release/app-release.apk "release/Bilexora_${TAG}.apk"
+          if [ -f release/app-release.apk ]; then
+            mv release/app-release.apk "release/Bilexora_${TAG}.apk"
+          else
+            echo 'Android APK 不存在(Android job 已关闭), 跳过重命名'
+          fi
+
           mv ios-release/Bilexora_ios_unsigned.ipa "release/Bilexora_ios_${TAG}_unsigned.ipa"
           ls -lh release
 
@@ -803,12 +870,18 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME:-manual}"
 
+          if [ -f "release/Bilexora_${TAG}.apk" ]; then
+            ANDROID_LINE="Android APK:
+
+          - Bilexora_${TAG}.apk"
+          else
+            ANDROID_LINE="(Android APK 本轮未构建)"
+          fi
+
           cat > release-notes.md <<EOF
           ## ${TAG}
 
-          Android APK:
-
-          - Bilexora_${TAG}.apk
+          ${ANDROID_LINE}
 
           iOS IPA (未签名, 需自行用 AltStore / Sideloadly 等工具自签安装):
 
@@ -825,6 +898,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body_path: release-notes.md
-          files: |
-            release/Bilexora_${{ github.ref_name }}.apk
-            release/Bilexora_ios_${{ github.ref_name }}_unsigned.ipa
+          # 用 glob: Android 关闭时只有 IPA 匹配, 重新开启后两个都会匹配。
+          # (不要逐行列出可能不存在的文件, action-gh-release 会因缺文件报错)
+          files: release/Bilexora_*

@@ -167,39 +167,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const Divider(),
 
-          // 母语
-          ListTile(
-            leading: const Icon(Icons.flag_outlined),
-            title: const Text('我的母语'),
-            subtitle: Text(languageNames[ref.watch(nativeLanguageProvider)] ?? '中文'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showLanguagePicker(
-              context,
-              ref.watch(nativeLanguageProvider),
-              (lang) {
-                ref.read(nativeLanguageProvider.notifier).state = lang;
-                _saveNativeLanguage(lang);
-              },
-            ),
-          ),
-          const Divider(),
-
-          // 双语阅读
-          ListTile(
-            leading: const Icon(Icons.language),
-            title: const Text('双语阅读'),
-            subtitle: Text(
-              ref.watch(bilingualEnabledProvider) ? '已开启' : '已关闭',
-              style: TextStyle(
-                color: ref.watch(bilingualEnabledProvider)
-                    ? Theme.of(context).colorScheme.primary
-                    : null,
+          // 学习（母语 + 双语阅读 合并框）
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: Text(
+                      '学习',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                    ),
+                  ),
+                  // 母语
+                  ListTile(
+                    leading: const Icon(Icons.flag_outlined),
+                    title: const Text('母语'),
+                    subtitle: Text(languageNames[ref.watch(nativeLanguageProvider)] ?? '中文'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => _showLanguagePicker(
+                      context,
+                      ref.watch(nativeLanguageProvider),
+                      (lang) {
+                        ref.read(nativeLanguageProvider.notifier).state = lang;
+                        _saveNativeLanguage(lang);
+                      },
+                    ),
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  // 双语阅读
+                  ListTile(
+                    leading: const Icon(Icons.language),
+                    title: const Text('双语阅读'),
+                    subtitle: Text(
+                      ref.watch(bilingualEnabledProvider) ? '已开启' : '已关闭',
+                      style: TextStyle(
+                        color: ref.watch(bilingualEnabledProvider)
+                            ? Theme.of(context).colorScheme.primary
+                            : null,
+                      ),
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => _showBilingualSettings(context, ref),
+                  ),
+                ],
               ),
             ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showBilingualSettings(context, ref),
           ),
-          const Divider(),
 
           // 翻译
           _SectionHeader(title: '翻译'),
